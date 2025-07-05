@@ -2,24 +2,24 @@
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
     <title>Tags on HOME</title>
-    <link>http://localhost:1313/tags/</link>
+    <link>https://yjloong.github.io/tags/</link>
     <description>Recent content in Tags on HOME</description>
     <generator>Hugo</generator>
     <language>zh</language>
     <lastBuildDate>Sat, 05 Jul 2025 00:00:00 +0000</lastBuildDate>
-    <atom:link href="http://localhost:1313/tags/index.xml" rel="self" type="application/rss+xml" />
+    <atom:link href="https://yjloong.github.io/tags/index.xml" rel="self" type="application/rss+xml" />
     <item>
       <title>Python</title>
-      <link>http://localhost:1313/tags/python/</link>
+      <link>https://yjloong.github.io/tags/python/</link>
       <pubDate>Fri, 04 Jul 2025 22:53:02 +0800</pubDate>
-      <guid>http://localhost:1313/tags/python/</guid>
+      <guid>https://yjloong.github.io/tags/python/</guid>
       <description></description>
     </item>
     <item>
       <title>RCC</title>
-      <link>http://localhost:1313/tags/rcc/</link>
+      <link>https://yjloong.github.io/tags/rcc/</link>
       <pubDate>Fri, 04 Jul 2025 22:53:02 +0800</pubDate>
-      <guid>http://localhost:1313/tags/rcc/</guid>
+      <guid>https://yjloong.github.io/tags/rcc/</guid>
       <description></description>
     </item>
   </channel>
