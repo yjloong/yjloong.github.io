@@ -141,29 +141,6 @@
       </div>
     
     <h1 class="f3 near-black">
-      <a href="/post/qemu-debug/" class="link black dim">
-        qemu使用one-insn-per-tb进行debug
-      </a>
-    </h1>
-    <div class="nested-links f5 lh-copy nested-copy-line-height">
-      <h1 id="qemu-debug-尝试对某一段指令的执行情况进行跟踪类似arm-trace功能">QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能</h1>
-<ul>
-<li>某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。</li>
-<li>通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg …</li></ul>
-    </div>
-  <a href="/post/qemu-debug/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
-  </div>
-
-        </div>
-      
-        <div class="w-100 w-30-l mb4 relative bg-white">
-            <div class="mb3 pa4 mid-gray overflow-hidden">
-    
-      <div class="f6">
-        七月 11, 2025
-      </div>
-    
-    <h1 class="f3 near-black">
       <a href="/post/cpt_fpga/" class="link black dim">
         在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles
       </a>
@@ -179,6 +156,29 @@
 <li> …</li></ol>
     </div>
   <a href="/post/cpt_fpga/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
+  </div>
+
+        </div>
+      
+        <div class="w-100 w-30-l mb4 relative bg-white">
+            <div class="mb3 pa4 mid-gray overflow-hidden">
+    
+      <div class="f6">
+        七月 11, 2025
+      </div>
+    
+    <h1 class="f3 near-black">
+      <a href="/post/qemu-debug/" class="link black dim">
+        qemu使用one-insn-per-tb进行debug
+      </a>
+    </h1>
+    <div class="nested-links f5 lh-copy nested-copy-line-height">
+      <h1 id="qemu-debug-尝试对某一段指令的执行情况进行跟踪类似arm-trace功能">QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能</h1>
+<ul>
+<li>某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。</li>
+<li>通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg …</li></ul>
+    </div>
+  <a href="/post/qemu-debug/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
   </div>
 
         </div>
