@@ -1,7 +1,7 @@
 {
 	"version": 3,
 	"file": "main.css",
-	"sourceRoot": "/home/bajeer/hugo-obsidian",
+	"sourceRoot": "/home/ubuntu/hugo_with_obsidian",
 	"sources": [
 		"ananke/css/main.css"
 	],
