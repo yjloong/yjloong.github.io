@@ -1,0 +1,856 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    
+    <title>在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles | HOME</title>
+    <meta name="viewport" content="width=device-width,minimum-scale=1">
+    <meta name="description" content="概述
+
+checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。
+但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。
+以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处：
+
+
+所需时间更短 (5h &ndash;&gt; 100s)，100s时间囊括如下(以 2G checkpoint为例)：
+
+
+websocket拷贝50M checkpoint到FPGA服务器(5s)
+通过DMA烧录50M checkpoint到FPGA DDR(5s)
+程序自拷贝，自解压(lz4解压算法，75s)
+CRC32校验(riscv扩展加速7.5倍后用时15s)
+执行2000w目标指令(0.5s)
+
+
+更快评估修改后的核性能变化，以及验证核的正确性。
+真实硬件环境具有更好的真实性。
+快速复现OS内的出现bug，软件仿真几乎难以复现千万条指令后出现的bug，配合jtag更快调试软硬件问题。
+配合高性能逻辑分析仪，在接近全速下捕获难以在仿真中复现的并发 bug 的真实波形。这对调试硬件问题尤为有效。
+
+实现方案
+
+软仿可以简单实现N条指令后退出，对应到硬仿，则是通过修改CPU核，通过纯硬件方式实现。
+实现方式可以根据硬件的参与度分类，为了通用性实现，本方案采用纯软件方式实现。
+纯软件实现，基本原理就是通过hpmcounter溢出中断实现，执行N条指令后溢出中断，因此需要sscofpmf，zihpm扩展支持。
+纯软件方式实现有如下方案：
+
+
+用户层实现，通过perf_event_open系统调用接口，将benchmark作为子进程，设定period为N条指令，父进程采用poll等待，修改checkpoint中对应counter的初始值，实现控制子进程执行指令数，具体实现方式看后文。
+OS层实现，通过修改新的PMU驱动实现，实现一个counter overflow handler，触发后打印约定标志，标识指令数执行完成。需要在restorer中修改mhpmevent/mhpmcounter实现溢出中断。具体实现方式看后文。
+非侵入式，opensbi/OS透明，通过M-level异常中断机制实现，下文有详细介绍。
+
+软件非侵入式实现
+
+为了避免对opensbi/linux的修改，以及灵活性，可拓展性方面，选择最复杂的非侵入式方式，此方案有如下好处：
+调试方便，不用重新编译opensbi/linux，再重制checkpoint。
+无需修改opensbi/linux，保持系统完整性。
+可灵活增加其他功能，如在不重制checkpoint的前提下，通过另外的counter实现在FPGA中进行checkpoint热点统计。
+
+实现原理
+
+对checkpoint中的csr值进行修改，禁止LCOFIP委托给S态，打开mstatus.MIE，打开mie.LCOFIP，设置mhpmevent/mhpmcounter/mcountinhibit。
+在restorer中实现M-level异常过滤，如果是counter overflow，则拦下来进行处理，如果不是，则跳转到opensbi中的异常处理入口进行处理。
+在checkpoint中修改CSR_MTVEC为restorer中新的trap入口地址；
+如果是溢出中断，保存全部通用寄存器，拦截处理，处理完成后，恢复全部通用寄存器，执行mret指令；
+否则保存除a0-a7之外通用寄存器，进入opensbi处理；
+从未使用的、存放opensbi异常入口的csr中取出，使用jalr指令跳进去；
+修改opensbi中mret指令，替换为一条普通跳回指令ret；
+恢复部分通用寄存器；
+执行mret指令。
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250710174635.png)
+
+非侵入实现
+yjloong/CPT_FPGA: 支持在FPGA上跑指定指令数的Checkpoint。
+OS 驱动层实现
+#define pr_fmt(fmt) &#34;riscv-pmu-special: &#34; fmt
+
+#include &lt;linux/module.h&gt;
+#include &lt;linux/interrupt.h&gt;
+#include &lt;linux/irq.h&gt;
+#include &lt;linux/irqdomain.h&gt;
+#include &lt;linux/of_irq.h&gt;
+#include &lt;linux/of.h&gt;
+
+#define IRQ_NUM RV_IRQ_PMU
+
+#include &lt;asm/csr.h&gt;
+
+struct tmp_data{
+int dev_id;
+};
+
+static DEFINE_PER_CPU(struct tmp_data, irq_data);
+static irqreturn_t interrupt_handler(int irq, void *dev_id)
+{
+uint64_t cc = csr_read(CSR_CYCLE);
+csr_clear(CSR_SIP, BIT(IRQ_NUM));
+// print end flag
+printk(KERN_ERR &#34;\n\nCYCLE:%ld\n&#34;, cc);
+
+while(1) asm(&#34;wfi&#34;);
+
+return IRQ_HANDLED;
+}
+
+static int pmu_sbi_setup_irqs(void)
+{
+int ret;
+struct irq_domain *domain = NULL;
+uint32_t riscv_pmu_irq_num;
+uint32_t riscv_pmu_irq;
+
+riscv_pmu_irq_num = IRQ_NUM;
+domain = irq_find_matching_fwnode(riscv_get_intc_hwnode(), DOMAIN_BUS_ANY);
+if(!domain)
+return -ENODEV;
+riscv_pmu_irq = irq_create_mapping(domain, riscv_pmu_irq_num);
+if (!riscv_pmu_irq)
+return -ENODEV;
+
+ret = request_percpu_irq(riscv_pmu_irq, interrupt_handler, &#34;riscv-pmu&#34;, &amp;irq_data);
+if (ret)
+return ret;
+return 0;
+}
+
+static int __init my_driver_init(void)
+{
+printk(KERN_INFO &#34;Initializeing interrupt driver...\n&#34;);
+pmu_sbi_setup_irqs();
+printk(KERN_INFO &#34;Done\n&#34;);
+return 0;
+}
+
+static void __exit my_driver_exit(void)
+{
+free_irq(IRQ_NUM, NULL);
+}
+
+module_init(my_driver_init);
+module_exit(my_driver_exit);
+
+MODULE_LICENSE(&#34;GPL&#34;);
+MODULE_AUTHOR(&#34;YOUR NAME&#34;);
+MODULE_DESCRIPTION(&#34;Well&#34;);
+用户层实现
+#include &lt;bits/types/sigset_t.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;getopt.h&gt;
+#include &lt;linux/perf_event.h&gt;
+#include &lt;sched.h&gt;
+#include &lt;signal.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;sys/epoll.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;sys/syscall.h&gt;
+#include &lt;sys/wait.h&gt;
+#include &lt;time.h&gt;
+#include &lt;sys/signalfd.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;assert.h&gt;
+
+void print_help(const char *prog_name) {
+printf(&#34;Usage: %s [OPTIONS] -- COMMAND [ARGS...]\n&#34;, prog_name);
+printf(&#34;Options:\n&#34;);
+printf(&#34;  -I INSTRS    Stop the child process after the INSTRS\n&#34;);
+printf(&#34;  -h           Show this help message\n&#34;);
+printf(&#34;  -q           quiet output of program\n&#34;);
+printf(&#34;\nExample: %s -I100000000 -- ls -l\n&#34;, prog_name);
+}
+
+// 包装 perf_event_open 系统调用
+static int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu,
+int group_fd, unsigned long flags) {
+return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
+}
+
+// sizeof ringbuffer pages: 16 * 4KB
+#define RING_BUFFER_PAGES 64
+
+void *rbuf;
+long page_size = 0;
+
+int main(int argc, char *const argv[]) {
+uint64_t sample_period = 10000;
+int quiet = 0;  // 不打印子进程输出内容
+int opt;
+uint64_t num_cycles = 0;  // 如果不为0，则运行指定次数就停止
+time_t tb = time(NULL);
+time_t te = time(NULL);
+
+page_size = sysconf(_SC_PAGESIZE);
+
+while ((opt = getopt(argc, argv, &#34;hp:I:qn&#34;)) != -1) {
+switch (opt) {
+case &#39;h&#39;:
+print_help(argv[0]);
+exit(EXIT_SUCCESS);
+case &#39;q&#39;:
+quiet = 1;
+case &#39;I&#39;:
+num_cycles = strtoul(optarg, NULL, 10);
+sample_period = num_cycles;
+break;
+default:
+print_help(argv[0]);
+exit(EXIT_FAILURE);
+}
+}
+
+if (optind &gt;= argc) {
+fprintf(stderr, &#34;No command specified\n&#34;);
+print_help(argv[0]);
+exit(EXIT_FAILURE);
+}
+
+char *const *cmd_argv = &amp;argv[optind];
+
+
+// 配置性能事件属性
+struct perf_event_attr attr;
+memset(&amp;attr, 0, sizeof(attr));
+attr.type = PERF_TYPE_HARDWARE;
+attr.size = sizeof(attr);
+attr.config = PERF_COUNT_HW_INSTRUCTIONS;
+attr.sample_period = sample_period;  // 每 10000 周期采样一次
+attr.sample_type = PERF_SAMPLE_IP;   // 采样指令指针
+attr.enable_on_exec = 1;
+attr.disabled = 0;
+
+attr.watermark = 0;
+attr.wakeup_events = 1;
+
+struct perf_event_attr ev_cycle;
+memset(&amp;ev_cycle, 0, sizeof(ev_cycle));
+ev_cycle.type = PERF_TYPE_HARDWARE;
+ev_cycle.size = sizeof(ev_cycle);
+ev_cycle.config = PERF_COUNT_HW_CPU_CYCLES;
+attr.enable_on_exec = 1;
+ev_cycle.disabled = 0;
+
+// 获取当前CPU id
+// int cpu = sched_getcpu();
+
+// 打开性能事件
+int cpu = 0;
+int fd_instr = perf_event_open(&amp;attr, -1, cpu, -1,
+0);  // for cpu0 all tasks.
+
+assert(fd_instr &gt;= 0);
+
+int fd_cycle = perf_event_open(&amp;ev_cycle, -1, cpu, -1,
+0);
+assert(fd_cycle &gt;= 0);
+
+
+// 映射环形缓冲区 必须有，否则epoll_wait会无法正确阻塞。
+rbuf = mmap(0, (1 &#43; 1) * page_size,
+PROT_READ | PROT_WRITE, MAP_SHARED, fd_instr, 0);
+
+assert(rbuf != MAP_FAILED);
+
+
+// But here we dont receive CIGCHLD triggered by SIGSTOP/SIGCONT .
+int epfd = epoll_create1(0);
+struct epoll_event ev = {
+.events = EPOLLIN,
+.data.fd = fd_instr,
+};
+epoll_ctl(epfd, EPOLL_CTL_ADD, fd_instr, &amp;ev);
+
+sigset_t mask;
+sigemptyset(&amp;mask);
+sigaddset(&amp;mask, SIGCHLD);
+sigprocmask(SIG_BLOCK, &amp;mask, NULL);
+
+
+int sfd = signalfd(-1, &amp;mask, 0); // Dont set SFD_NONBLOCK. It will cause epoll_wait to return immediately.
+
+struct epoll_event sig_event;
+sig_event.events = EPOLLIN;
+sig_event.data.fd = sfd;
+epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &amp;sig_event);
+
+
+
+pid_t child_pid = fork();
+if (child_pid == -1) {
+perror(&#34;fork&#34;);
+exit(EXIT_FAILURE);
+}
+
+if (child_pid == 0) {
+// 子进程：暂停自身，等待父进程设置性能计数器
+// raise(SIGSTOP);
+// 将标准输出重定向到 /dev/null
+if (quiet) {
+close(STDOUT_FILENO);
+close(STDERR_FILENO);
+open(&#34;/dev/null&#34;, O_WRONLY);
+open(&#34;/dev/null&#34;, O_WRONLY);
+}
+
+// 执行新程序（示例中使用 ls）
+printf(&#34;Cmd: %s %s\n&#34;, cmd_argv[0], cmd_argv[1]);
+execvp(cmd_argv[0], cmd_argv);
+perror(&#34;execvp&#34;);
+exit(EXIT_FAILURE);
+} else {
+
+// 父进程：设置性能计数器
+int status;
+
+tb = time(NULL);
+
+struct epoll_event got;
+int retval = epoll_wait(epfd, &amp;got, 1, -1);
+
+if (got.data.fd == sfd) { // child process exited.
+// use ioctl to stop perf counter
+ioctl(fd_instr, PERF_EVENT_IOC_DISABLE, 0);
+ioctl(fd_cycle, PERF_EVENT_IOC_DISABLE, 0);
+
+} else { // cycle counter reached.
+kill(child_pid, SIGKILL); // kill directly
+}
+
+te = time(NULL);
+printf(&#34;executed time: %ld secs\n&#34;, te - tb);
+long long count;
+
+read(fd_cycle, &amp;count, sizeof(count));
+printf(&#34;cycles: %lld\n&#34;, count);
+
+read(fd_instr, &amp;count, sizeof(count));
+printf(&#34;instructions: %lld\n&#34;, count);
+
+
+pid_t ret = waitpid(child_pid, &amp;status, WNOHANG);
+printf(&#34;child exit %d\n&#34;, status);
+
+close(fd_instr);
+close(fd_cycle);
+close(sfd);
+
+return 0;
+}
+}
+">
+    <meta name="generator" content="Hugo 0.148.0">
+    
+    
+    
+      <meta name="robots" content="index, follow">
+    
+    <meta name="author" content="yjloong">
+    
+
+    
+<link rel="stylesheet" href="/ananke/css/main.min.cd2c801248c2f81c7369ed96f333206cb56c7a83f356f5eed4b43a403c352549.css" >
+
+
+
+
+    
+
+
+    
+      
+<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+
+
+    
+
+    
+
+    
+      <link rel="canonical" href="https://yjloong.github.io/post/cpt_fpga/">
+    
+
+    <meta property="og:url" content="https://yjloong.github.io/post/cpt_fpga/">
+  <meta property="og:site_name" content="HOME">
+  <meta property="og:title" content="在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles">
+  <meta property="og:description" content="概述 checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。 但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。 以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处： 所需时间更短 (5h –&gt; 100s)，100s时间囊括如下(以 2G checkpoint为例)： websocket拷贝50M checkpoint到FPGA服务器(5s) 通过DMA烧录50M checkpoint到FPGA DDR(5s) 程序自拷贝，自解压(lz4解压算法，75s) CRC32校验(riscv扩展加速7.5倍后用时15s) 执行2000w目标指令(0.5s) 更快评估修改后的核性能变化，以及验证核的正确性。 真实硬件环境具有更好的真实性。 快速复现OS内的出现bug，软件仿真几乎难以复现千万条指令后出现的bug，配合jtag更快调试软硬件问题。 配合高性能逻辑分析仪，在接近全速下捕获难以在仿真中复现的并发 bug 的真实波形。这对调试硬件问题尤为有效。 实现方案 软仿可以简单实现N条指令后退出，对应到硬仿，则是通过修改CPU核，通过纯硬件方式实现。 实现方式可以根据硬件的参与度分类，为了通用性实现，本方案采用纯软件方式实现。 纯软件实现，基本原理就是通过hpmcounter溢出中断实现，执行N条指令后溢出中断，因此需要sscofpmf，zihpm扩展支持。 纯软件方式实现有如下方案： 用户层实现，通过perf_event_open系统调用接口，将benchmark作为子进程，设定period为N条指令，父进程采用poll等待，修改checkpoint中对应counter的初始值，实现控制子进程执行指令数，具体实现方式看后文。 OS层实现，通过修改新的PMU驱动实现，实现一个counter overflow handler，触发后打印约定标志，标识指令数执行完成。需要在restorer中修改mhpmevent/mhpmcounter实现溢出中断。具体实现方式看后文。 非侵入式，opensbi/OS透明，通过M-level异常中断机制实现，下文有详细介绍。 软件非侵入式实现 为了避免对opensbi/linux的修改，以及灵活性，可拓展性方面，选择最复杂的非侵入式方式，此方案有如下好处： 调试方便，不用重新编译opensbi/linux，再重制checkpoint。 无需修改opensbi/linux，保持系统完整性。 可灵活增加其他功能，如在不重制checkpoint的前提下，通过另外的counter实现在FPGA中进行checkpoint热点统计。 实现原理 对checkpoint中的csr值进行修改，禁止LCOFIP委托给S态，打开mstatus.MIE，打开mie.LCOFIP，设置mhpmevent/mhpmcounter/mcountinhibit。 在restorer中实现M-level异常过滤，如果是counter overflow，则拦下来进行处理，如果不是，则跳转到opensbi中的异常处理入口进行处理。 在checkpoint中修改CSR_MTVEC为restorer中新的trap入口地址； 如果是溢出中断，保存全部通用寄存器，拦截处理，处理完成后，恢复全部通用寄存器，执行mret指令； 否则保存除a0-a7之外通用寄存器，进入opensbi处理； 从未使用的、存放opensbi异常入口的csr中取出，使用jalr指令跳进去； 修改opensbi中mret指令，替换为一条普通跳回指令ret； 恢复部分通用寄存器； 执行mret指令。 ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250710174635.png) 非侵入实现 yjloong/CPT_FPGA: 支持在FPGA上跑指定指令数的Checkpoint。
+OS 驱动层实现 #define pr_fmt(fmt) &#34;riscv-pmu-special: &#34; fmt #include &lt;linux/module.h&gt; #include &lt;linux/interrupt.h&gt; #include &lt;linux/irq.h&gt; #include &lt;linux/irqdomain.h&gt; #include &lt;linux/of_irq.h&gt; #include &lt;linux/of.h&gt; #define IRQ_NUM RV_IRQ_PMU #include &lt;asm/csr.h&gt; struct tmp_data{ int dev_id; }; static DEFINE_PER_CPU(struct tmp_data, irq_data); static irqreturn_t interrupt_handler(int irq, void *dev_id) { uint64_t cc = csr_read(CSR_CYCLE); csr_clear(CSR_SIP, BIT(IRQ_NUM)); // print end flag printk(KERN_ERR &#34;\n\nCYCLE:%ld\n&#34;, cc); while(1) asm(&#34;wfi&#34;); return IRQ_HANDLED; } static int pmu_sbi_setup_irqs(void) { int ret; struct irq_domain *domain = NULL; uint32_t riscv_pmu_irq_num; uint32_t riscv_pmu_irq; riscv_pmu_irq_num = IRQ_NUM; domain = irq_find_matching_fwnode(riscv_get_intc_hwnode(), DOMAIN_BUS_ANY); if(!domain) return -ENODEV; riscv_pmu_irq = irq_create_mapping(domain, riscv_pmu_irq_num); if (!riscv_pmu_irq) return -ENODEV; ret = request_percpu_irq(riscv_pmu_irq, interrupt_handler, &#34;riscv-pmu&#34;, &amp;irq_data); if (ret) return ret; return 0; } static int __init my_driver_init(void) { printk(KERN_INFO &#34;Initializeing interrupt driver...\n&#34;); pmu_sbi_setup_irqs(); printk(KERN_INFO &#34;Done\n&#34;); return 0; } static void __exit my_driver_exit(void) { free_irq(IRQ_NUM, NULL); } module_init(my_driver_init); module_exit(my_driver_exit); MODULE_LICENSE(&#34;GPL&#34;); MODULE_AUTHOR(&#34;YOUR NAME&#34;); MODULE_DESCRIPTION(&#34;Well&#34;); 用户层实现 #include &lt;bits/types/sigset_t.h&gt; #include &lt;errno.h&gt; #include &lt;fcntl.h&gt; #include &lt;getopt.h&gt; #include &lt;linux/perf_event.h&gt; #include &lt;sched.h&gt; #include &lt;signal.h&gt; #include &lt;stdint.h&gt; #include &lt;stdio.h&gt; #include &lt;stdlib.h&gt; #include &lt;string.h&gt; #include &lt;sys/epoll.h&gt; #include &lt;sys/ioctl.h&gt; #include &lt;sys/mman.h&gt; #include &lt;sys/syscall.h&gt; #include &lt;sys/wait.h&gt; #include &lt;time.h&gt; #include &lt;sys/signalfd.h&gt; #include &lt;unistd.h&gt; #include &lt;assert.h&gt; void print_help(const char *prog_name) { printf(&#34;Usage: %s [OPTIONS] -- COMMAND [ARGS...]\n&#34;, prog_name); printf(&#34;Options:\n&#34;); printf(&#34; -I INSTRS Stop the child process after the INSTRS\n&#34;); printf(&#34; -h Show this help message\n&#34;); printf(&#34; -q quiet output of program\n&#34;); printf(&#34;\nExample: %s -I100000000 -- ls -l\n&#34;, prog_name); } // 包装 perf_event_open 系统调用 static int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) { return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags); } // sizeof ringbuffer pages: 16 * 4KB #define RING_BUFFER_PAGES 64 void *rbuf; long page_size = 0; int main(int argc, char *const argv[]) { uint64_t sample_period = 10000; int quiet = 0; // 不打印子进程输出内容 int opt; uint64_t num_cycles = 0; // 如果不为0，则运行指定次数就停止 time_t tb = time(NULL); time_t te = time(NULL); page_size = sysconf(_SC_PAGESIZE); while ((opt = getopt(argc, argv, &#34;hp:I:qn&#34;)) != -1) { switch (opt) { case &#39;h&#39;: print_help(argv[0]); exit(EXIT_SUCCESS); case &#39;q&#39;: quiet = 1; case &#39;I&#39;: num_cycles = strtoul(optarg, NULL, 10); sample_period = num_cycles; break; default: print_help(argv[0]); exit(EXIT_FAILURE); } } if (optind &gt;= argc) { fprintf(stderr, &#34;No command specified\n&#34;); print_help(argv[0]); exit(EXIT_FAILURE); } char *const *cmd_argv = &amp;argv[optind]; // 配置性能事件属性 struct perf_event_attr attr; memset(&amp;attr, 0, sizeof(attr)); attr.type = PERF_TYPE_HARDWARE; attr.size = sizeof(attr); attr.config = PERF_COUNT_HW_INSTRUCTIONS; attr.sample_period = sample_period; // 每 10000 周期采样一次 attr.sample_type = PERF_SAMPLE_IP; // 采样指令指针 attr.enable_on_exec = 1; attr.disabled = 0; attr.watermark = 0; attr.wakeup_events = 1; struct perf_event_attr ev_cycle; memset(&amp;ev_cycle, 0, sizeof(ev_cycle)); ev_cycle.type = PERF_TYPE_HARDWARE; ev_cycle.size = sizeof(ev_cycle); ev_cycle.config = PERF_COUNT_HW_CPU_CYCLES; attr.enable_on_exec = 1; ev_cycle.disabled = 0; // 获取当前CPU id // int cpu = sched_getcpu(); // 打开性能事件 int cpu = 0; int fd_instr = perf_event_open(&amp;attr, -1, cpu, -1, 0); // for cpu0 all tasks. assert(fd_instr &gt;= 0); int fd_cycle = perf_event_open(&amp;ev_cycle, -1, cpu, -1, 0); assert(fd_cycle &gt;= 0); // 映射环形缓冲区 必须有，否则epoll_wait会无法正确阻塞。 rbuf = mmap(0, (1 &#43; 1) * page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_instr, 0); assert(rbuf != MAP_FAILED); // But here we dont receive CIGCHLD triggered by SIGSTOP/SIGCONT . int epfd = epoll_create1(0); struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd_instr, }; epoll_ctl(epfd, EPOLL_CTL_ADD, fd_instr, &amp;ev); sigset_t mask; sigemptyset(&amp;mask); sigaddset(&amp;mask, SIGCHLD); sigprocmask(SIG_BLOCK, &amp;mask, NULL); int sfd = signalfd(-1, &amp;mask, 0); // Dont set SFD_NONBLOCK. It will cause epoll_wait to return immediately. struct epoll_event sig_event; sig_event.events = EPOLLIN; sig_event.data.fd = sfd; epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &amp;sig_event); pid_t child_pid = fork(); if (child_pid == -1) { perror(&#34;fork&#34;); exit(EXIT_FAILURE); } if (child_pid == 0) { // 子进程：暂停自身，等待父进程设置性能计数器 // raise(SIGSTOP); // 将标准输出重定向到 /dev/null if (quiet) { close(STDOUT_FILENO); close(STDERR_FILENO); open(&#34;/dev/null&#34;, O_WRONLY); open(&#34;/dev/null&#34;, O_WRONLY); } // 执行新程序（示例中使用 ls） printf(&#34;Cmd: %s %s\n&#34;, cmd_argv[0], cmd_argv[1]); execvp(cmd_argv[0], cmd_argv); perror(&#34;execvp&#34;); exit(EXIT_FAILURE); } else { // 父进程：设置性能计数器 int status; tb = time(NULL); struct epoll_event got; int retval = epoll_wait(epfd, &amp;got, 1, -1); if (got.data.fd == sfd) { // child process exited. // use ioctl to stop perf counter ioctl(fd_instr, PERF_EVENT_IOC_DISABLE, 0); ioctl(fd_cycle, PERF_EVENT_IOC_DISABLE, 0); } else { // cycle counter reached. kill(child_pid, SIGKILL); // kill directly } te = time(NULL); printf(&#34;executed time: %ld secs\n&#34;, te - tb); long long count; read(fd_cycle, &amp;count, sizeof(count)); printf(&#34;cycles: %lld\n&#34;, count); read(fd_instr, &amp;count, sizeof(count)); printf(&#34;instructions: %lld\n&#34;, count); pid_t ret = waitpid(child_pid, &amp;status, WNOHANG); printf(&#34;child exit %d\n&#34;, status); close(fd_instr); close(fd_cycle); close(sfd); return 0; } }">
+  <meta property="og:locale" content="zh">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="post">
+    <meta property="article:published_time" content="2025-07-11T21:50:09+00:00">
+    <meta property="article:modified_time" content="2025-07-11T21:41:48+00:00">
+
+  <meta itemprop="name" content="在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles">
+  <meta itemprop="description" content="概述 checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。 但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。 以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处： 所需时间更短 (5h –&gt; 100s)，100s时间囊括如下(以 2G checkpoint为例)： websocket拷贝50M checkpoint到FPGA服务器(5s) 通过DMA烧录50M checkpoint到FPGA DDR(5s) 程序自拷贝，自解压(lz4解压算法，75s) CRC32校验(riscv扩展加速7.5倍后用时15s) 执行2000w目标指令(0.5s) 更快评估修改后的核性能变化，以及验证核的正确性。 真实硬件环境具有更好的真实性。 快速复现OS内的出现bug，软件仿真几乎难以复现千万条指令后出现的bug，配合jtag更快调试软硬件问题。 配合高性能逻辑分析仪，在接近全速下捕获难以在仿真中复现的并发 bug 的真实波形。这对调试硬件问题尤为有效。 实现方案 软仿可以简单实现N条指令后退出，对应到硬仿，则是通过修改CPU核，通过纯硬件方式实现。 实现方式可以根据硬件的参与度分类，为了通用性实现，本方案采用纯软件方式实现。 纯软件实现，基本原理就是通过hpmcounter溢出中断实现，执行N条指令后溢出中断，因此需要sscofpmf，zihpm扩展支持。 纯软件方式实现有如下方案： 用户层实现，通过perf_event_open系统调用接口，将benchmark作为子进程，设定period为N条指令，父进程采用poll等待，修改checkpoint中对应counter的初始值，实现控制子进程执行指令数，具体实现方式看后文。 OS层实现，通过修改新的PMU驱动实现，实现一个counter overflow handler，触发后打印约定标志，标识指令数执行完成。需要在restorer中修改mhpmevent/mhpmcounter实现溢出中断。具体实现方式看后文。 非侵入式，opensbi/OS透明，通过M-level异常中断机制实现，下文有详细介绍。 软件非侵入式实现 为了避免对opensbi/linux的修改，以及灵活性，可拓展性方面，选择最复杂的非侵入式方式，此方案有如下好处： 调试方便，不用重新编译opensbi/linux，再重制checkpoint。 无需修改opensbi/linux，保持系统完整性。 可灵活增加其他功能，如在不重制checkpoint的前提下，通过另外的counter实现在FPGA中进行checkpoint热点统计。 实现原理 对checkpoint中的csr值进行修改，禁止LCOFIP委托给S态，打开mstatus.MIE，打开mie.LCOFIP，设置mhpmevent/mhpmcounter/mcountinhibit。 在restorer中实现M-level异常过滤，如果是counter overflow，则拦下来进行处理，如果不是，则跳转到opensbi中的异常处理入口进行处理。 在checkpoint中修改CSR_MTVEC为restorer中新的trap入口地址； 如果是溢出中断，保存全部通用寄存器，拦截处理，处理完成后，恢复全部通用寄存器，执行mret指令； 否则保存除a0-a7之外通用寄存器，进入opensbi处理； 从未使用的、存放opensbi异常入口的csr中取出，使用jalr指令跳进去； 修改opensbi中mret指令，替换为一条普通跳回指令ret； 恢复部分通用寄存器； 执行mret指令。 ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250710174635.png) 非侵入实现 yjloong/CPT_FPGA: 支持在FPGA上跑指定指令数的Checkpoint。
+OS 驱动层实现 #define pr_fmt(fmt) &#34;riscv-pmu-special: &#34; fmt #include &lt;linux/module.h&gt; #include &lt;linux/interrupt.h&gt; #include &lt;linux/irq.h&gt; #include &lt;linux/irqdomain.h&gt; #include &lt;linux/of_irq.h&gt; #include &lt;linux/of.h&gt; #define IRQ_NUM RV_IRQ_PMU #include &lt;asm/csr.h&gt; struct tmp_data{ int dev_id; }; static DEFINE_PER_CPU(struct tmp_data, irq_data); static irqreturn_t interrupt_handler(int irq, void *dev_id) { uint64_t cc = csr_read(CSR_CYCLE); csr_clear(CSR_SIP, BIT(IRQ_NUM)); // print end flag printk(KERN_ERR &#34;\n\nCYCLE:%ld\n&#34;, cc); while(1) asm(&#34;wfi&#34;); return IRQ_HANDLED; } static int pmu_sbi_setup_irqs(void) { int ret; struct irq_domain *domain = NULL; uint32_t riscv_pmu_irq_num; uint32_t riscv_pmu_irq; riscv_pmu_irq_num = IRQ_NUM; domain = irq_find_matching_fwnode(riscv_get_intc_hwnode(), DOMAIN_BUS_ANY); if(!domain) return -ENODEV; riscv_pmu_irq = irq_create_mapping(domain, riscv_pmu_irq_num); if (!riscv_pmu_irq) return -ENODEV; ret = request_percpu_irq(riscv_pmu_irq, interrupt_handler, &#34;riscv-pmu&#34;, &amp;irq_data); if (ret) return ret; return 0; } static int __init my_driver_init(void) { printk(KERN_INFO &#34;Initializeing interrupt driver...\n&#34;); pmu_sbi_setup_irqs(); printk(KERN_INFO &#34;Done\n&#34;); return 0; } static void __exit my_driver_exit(void) { free_irq(IRQ_NUM, NULL); } module_init(my_driver_init); module_exit(my_driver_exit); MODULE_LICENSE(&#34;GPL&#34;); MODULE_AUTHOR(&#34;YOUR NAME&#34;); MODULE_DESCRIPTION(&#34;Well&#34;); 用户层实现 #include &lt;bits/types/sigset_t.h&gt; #include &lt;errno.h&gt; #include &lt;fcntl.h&gt; #include &lt;getopt.h&gt; #include &lt;linux/perf_event.h&gt; #include &lt;sched.h&gt; #include &lt;signal.h&gt; #include &lt;stdint.h&gt; #include &lt;stdio.h&gt; #include &lt;stdlib.h&gt; #include &lt;string.h&gt; #include &lt;sys/epoll.h&gt; #include &lt;sys/ioctl.h&gt; #include &lt;sys/mman.h&gt; #include &lt;sys/syscall.h&gt; #include &lt;sys/wait.h&gt; #include &lt;time.h&gt; #include &lt;sys/signalfd.h&gt; #include &lt;unistd.h&gt; #include &lt;assert.h&gt; void print_help(const char *prog_name) { printf(&#34;Usage: %s [OPTIONS] -- COMMAND [ARGS...]\n&#34;, prog_name); printf(&#34;Options:\n&#34;); printf(&#34; -I INSTRS Stop the child process after the INSTRS\n&#34;); printf(&#34; -h Show this help message\n&#34;); printf(&#34; -q quiet output of program\n&#34;); printf(&#34;\nExample: %s -I100000000 -- ls -l\n&#34;, prog_name); } // 包装 perf_event_open 系统调用 static int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) { return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags); } // sizeof ringbuffer pages: 16 * 4KB #define RING_BUFFER_PAGES 64 void *rbuf; long page_size = 0; int main(int argc, char *const argv[]) { uint64_t sample_period = 10000; int quiet = 0; // 不打印子进程输出内容 int opt; uint64_t num_cycles = 0; // 如果不为0，则运行指定次数就停止 time_t tb = time(NULL); time_t te = time(NULL); page_size = sysconf(_SC_PAGESIZE); while ((opt = getopt(argc, argv, &#34;hp:I:qn&#34;)) != -1) { switch (opt) { case &#39;h&#39;: print_help(argv[0]); exit(EXIT_SUCCESS); case &#39;q&#39;: quiet = 1; case &#39;I&#39;: num_cycles = strtoul(optarg, NULL, 10); sample_period = num_cycles; break; default: print_help(argv[0]); exit(EXIT_FAILURE); } } if (optind &gt;= argc) { fprintf(stderr, &#34;No command specified\n&#34;); print_help(argv[0]); exit(EXIT_FAILURE); } char *const *cmd_argv = &amp;argv[optind]; // 配置性能事件属性 struct perf_event_attr attr; memset(&amp;attr, 0, sizeof(attr)); attr.type = PERF_TYPE_HARDWARE; attr.size = sizeof(attr); attr.config = PERF_COUNT_HW_INSTRUCTIONS; attr.sample_period = sample_period; // 每 10000 周期采样一次 attr.sample_type = PERF_SAMPLE_IP; // 采样指令指针 attr.enable_on_exec = 1; attr.disabled = 0; attr.watermark = 0; attr.wakeup_events = 1; struct perf_event_attr ev_cycle; memset(&amp;ev_cycle, 0, sizeof(ev_cycle)); ev_cycle.type = PERF_TYPE_HARDWARE; ev_cycle.size = sizeof(ev_cycle); ev_cycle.config = PERF_COUNT_HW_CPU_CYCLES; attr.enable_on_exec = 1; ev_cycle.disabled = 0; // 获取当前CPU id // int cpu = sched_getcpu(); // 打开性能事件 int cpu = 0; int fd_instr = perf_event_open(&amp;attr, -1, cpu, -1, 0); // for cpu0 all tasks. assert(fd_instr &gt;= 0); int fd_cycle = perf_event_open(&amp;ev_cycle, -1, cpu, -1, 0); assert(fd_cycle &gt;= 0); // 映射环形缓冲区 必须有，否则epoll_wait会无法正确阻塞。 rbuf = mmap(0, (1 &#43; 1) * page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_instr, 0); assert(rbuf != MAP_FAILED); // But here we dont receive CIGCHLD triggered by SIGSTOP/SIGCONT . int epfd = epoll_create1(0); struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd_instr, }; epoll_ctl(epfd, EPOLL_CTL_ADD, fd_instr, &amp;ev); sigset_t mask; sigemptyset(&amp;mask); sigaddset(&amp;mask, SIGCHLD); sigprocmask(SIG_BLOCK, &amp;mask, NULL); int sfd = signalfd(-1, &amp;mask, 0); // Dont set SFD_NONBLOCK. It will cause epoll_wait to return immediately. struct epoll_event sig_event; sig_event.events = EPOLLIN; sig_event.data.fd = sfd; epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &amp;sig_event); pid_t child_pid = fork(); if (child_pid == -1) { perror(&#34;fork&#34;); exit(EXIT_FAILURE); } if (child_pid == 0) { // 子进程：暂停自身，等待父进程设置性能计数器 // raise(SIGSTOP); // 将标准输出重定向到 /dev/null if (quiet) { close(STDOUT_FILENO); close(STDERR_FILENO); open(&#34;/dev/null&#34;, O_WRONLY); open(&#34;/dev/null&#34;, O_WRONLY); } // 执行新程序（示例中使用 ls） printf(&#34;Cmd: %s %s\n&#34;, cmd_argv[0], cmd_argv[1]); execvp(cmd_argv[0], cmd_argv); perror(&#34;execvp&#34;); exit(EXIT_FAILURE); } else { // 父进程：设置性能计数器 int status; tb = time(NULL); struct epoll_event got; int retval = epoll_wait(epfd, &amp;got, 1, -1); if (got.data.fd == sfd) { // child process exited. // use ioctl to stop perf counter ioctl(fd_instr, PERF_EVENT_IOC_DISABLE, 0); ioctl(fd_cycle, PERF_EVENT_IOC_DISABLE, 0); } else { // cycle counter reached. kill(child_pid, SIGKILL); // kill directly } te = time(NULL); printf(&#34;executed time: %ld secs\n&#34;, te - tb); long long count; read(fd_cycle, &amp;count, sizeof(count)); printf(&#34;cycles: %lld\n&#34;, count); read(fd_instr, &amp;count, sizeof(count)); printf(&#34;instructions: %lld\n&#34;, count); pid_t ret = waitpid(child_pid, &amp;status, WNOHANG); printf(&#34;child exit %d\n&#34;, status); close(fd_instr); close(fd_cycle); close(sfd); return 0; } }">
+  <meta itemprop="datePublished" content="2025-07-11T21:50:09+00:00">
+  <meta itemprop="dateModified" content="2025-07-11T21:41:48+00:00">
+  <meta itemprop="wordCount" content="746">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles">
+  <meta name="twitter:description" content="概述 checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。 但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。 以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处： 所需时间更短 (5h –&gt; 100s)，100s时间囊括如下(以 2G checkpoint为例)： websocket拷贝50M checkpoint到FPGA服务器(5s) 通过DMA烧录50M checkpoint到FPGA DDR(5s) 程序自拷贝，自解压(lz4解压算法，75s) CRC32校验(riscv扩展加速7.5倍后用时15s) 执行2000w目标指令(0.5s) 更快评估修改后的核性能变化，以及验证核的正确性。 真实硬件环境具有更好的真实性。 快速复现OS内的出现bug，软件仿真几乎难以复现千万条指令后出现的bug，配合jtag更快调试软硬件问题。 配合高性能逻辑分析仪，在接近全速下捕获难以在仿真中复现的并发 bug 的真实波形。这对调试硬件问题尤为有效。 实现方案 软仿可以简单实现N条指令后退出，对应到硬仿，则是通过修改CPU核，通过纯硬件方式实现。 实现方式可以根据硬件的参与度分类，为了通用性实现，本方案采用纯软件方式实现。 纯软件实现，基本原理就是通过hpmcounter溢出中断实现，执行N条指令后溢出中断，因此需要sscofpmf，zihpm扩展支持。 纯软件方式实现有如下方案： 用户层实现，通过perf_event_open系统调用接口，将benchmark作为子进程，设定period为N条指令，父进程采用poll等待，修改checkpoint中对应counter的初始值，实现控制子进程执行指令数，具体实现方式看后文。 OS层实现，通过修改新的PMU驱动实现，实现一个counter overflow handler，触发后打印约定标志，标识指令数执行完成。需要在restorer中修改mhpmevent/mhpmcounter实现溢出中断。具体实现方式看后文。 非侵入式，opensbi/OS透明，通过M-level异常中断机制实现，下文有详细介绍。 软件非侵入式实现 为了避免对opensbi/linux的修改，以及灵活性，可拓展性方面，选择最复杂的非侵入式方式，此方案有如下好处： 调试方便，不用重新编译opensbi/linux，再重制checkpoint。 无需修改opensbi/linux，保持系统完整性。 可灵活增加其他功能，如在不重制checkpoint的前提下，通过另外的counter实现在FPGA中进行checkpoint热点统计。 实现原理 对checkpoint中的csr值进行修改，禁止LCOFIP委托给S态，打开mstatus.MIE，打开mie.LCOFIP，设置mhpmevent/mhpmcounter/mcountinhibit。 在restorer中实现M-level异常过滤，如果是counter overflow，则拦下来进行处理，如果不是，则跳转到opensbi中的异常处理入口进行处理。 在checkpoint中修改CSR_MTVEC为restorer中新的trap入口地址； 如果是溢出中断，保存全部通用寄存器，拦截处理，处理完成后，恢复全部通用寄存器，执行mret指令； 否则保存除a0-a7之外通用寄存器，进入opensbi处理； 从未使用的、存放opensbi异常入口的csr中取出，使用jalr指令跳进去； 修改opensbi中mret指令，替换为一条普通跳回指令ret； 恢复部分通用寄存器； 执行mret指令。 ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250710174635.png) 非侵入实现 yjloong/CPT_FPGA: 支持在FPGA上跑指定指令数的Checkpoint。
+OS 驱动层实现 #define pr_fmt(fmt) &#34;riscv-pmu-special: &#34; fmt #include &lt;linux/module.h&gt; #include &lt;linux/interrupt.h&gt; #include &lt;linux/irq.h&gt; #include &lt;linux/irqdomain.h&gt; #include &lt;linux/of_irq.h&gt; #include &lt;linux/of.h&gt; #define IRQ_NUM RV_IRQ_PMU #include &lt;asm/csr.h&gt; struct tmp_data{ int dev_id; }; static DEFINE_PER_CPU(struct tmp_data, irq_data); static irqreturn_t interrupt_handler(int irq, void *dev_id) { uint64_t cc = csr_read(CSR_CYCLE); csr_clear(CSR_SIP, BIT(IRQ_NUM)); // print end flag printk(KERN_ERR &#34;\n\nCYCLE:%ld\n&#34;, cc); while(1) asm(&#34;wfi&#34;); return IRQ_HANDLED; } static int pmu_sbi_setup_irqs(void) { int ret; struct irq_domain *domain = NULL; uint32_t riscv_pmu_irq_num; uint32_t riscv_pmu_irq; riscv_pmu_irq_num = IRQ_NUM; domain = irq_find_matching_fwnode(riscv_get_intc_hwnode(), DOMAIN_BUS_ANY); if(!domain) return -ENODEV; riscv_pmu_irq = irq_create_mapping(domain, riscv_pmu_irq_num); if (!riscv_pmu_irq) return -ENODEV; ret = request_percpu_irq(riscv_pmu_irq, interrupt_handler, &#34;riscv-pmu&#34;, &amp;irq_data); if (ret) return ret; return 0; } static int __init my_driver_init(void) { printk(KERN_INFO &#34;Initializeing interrupt driver...\n&#34;); pmu_sbi_setup_irqs(); printk(KERN_INFO &#34;Done\n&#34;); return 0; } static void __exit my_driver_exit(void) { free_irq(IRQ_NUM, NULL); } module_init(my_driver_init); module_exit(my_driver_exit); MODULE_LICENSE(&#34;GPL&#34;); MODULE_AUTHOR(&#34;YOUR NAME&#34;); MODULE_DESCRIPTION(&#34;Well&#34;); 用户层实现 #include &lt;bits/types/sigset_t.h&gt; #include &lt;errno.h&gt; #include &lt;fcntl.h&gt; #include &lt;getopt.h&gt; #include &lt;linux/perf_event.h&gt; #include &lt;sched.h&gt; #include &lt;signal.h&gt; #include &lt;stdint.h&gt; #include &lt;stdio.h&gt; #include &lt;stdlib.h&gt; #include &lt;string.h&gt; #include &lt;sys/epoll.h&gt; #include &lt;sys/ioctl.h&gt; #include &lt;sys/mman.h&gt; #include &lt;sys/syscall.h&gt; #include &lt;sys/wait.h&gt; #include &lt;time.h&gt; #include &lt;sys/signalfd.h&gt; #include &lt;unistd.h&gt; #include &lt;assert.h&gt; void print_help(const char *prog_name) { printf(&#34;Usage: %s [OPTIONS] -- COMMAND [ARGS...]\n&#34;, prog_name); printf(&#34;Options:\n&#34;); printf(&#34; -I INSTRS Stop the child process after the INSTRS\n&#34;); printf(&#34; -h Show this help message\n&#34;); printf(&#34; -q quiet output of program\n&#34;); printf(&#34;\nExample: %s -I100000000 -- ls -l\n&#34;, prog_name); } // 包装 perf_event_open 系统调用 static int perf_event_open(struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags) { return syscall(__NR_perf_event_open, attr, pid, cpu, group_fd, flags); } // sizeof ringbuffer pages: 16 * 4KB #define RING_BUFFER_PAGES 64 void *rbuf; long page_size = 0; int main(int argc, char *const argv[]) { uint64_t sample_period = 10000; int quiet = 0; // 不打印子进程输出内容 int opt; uint64_t num_cycles = 0; // 如果不为0，则运行指定次数就停止 time_t tb = time(NULL); time_t te = time(NULL); page_size = sysconf(_SC_PAGESIZE); while ((opt = getopt(argc, argv, &#34;hp:I:qn&#34;)) != -1) { switch (opt) { case &#39;h&#39;: print_help(argv[0]); exit(EXIT_SUCCESS); case &#39;q&#39;: quiet = 1; case &#39;I&#39;: num_cycles = strtoul(optarg, NULL, 10); sample_period = num_cycles; break; default: print_help(argv[0]); exit(EXIT_FAILURE); } } if (optind &gt;= argc) { fprintf(stderr, &#34;No command specified\n&#34;); print_help(argv[0]); exit(EXIT_FAILURE); } char *const *cmd_argv = &amp;argv[optind]; // 配置性能事件属性 struct perf_event_attr attr; memset(&amp;attr, 0, sizeof(attr)); attr.type = PERF_TYPE_HARDWARE; attr.size = sizeof(attr); attr.config = PERF_COUNT_HW_INSTRUCTIONS; attr.sample_period = sample_period; // 每 10000 周期采样一次 attr.sample_type = PERF_SAMPLE_IP; // 采样指令指针 attr.enable_on_exec = 1; attr.disabled = 0; attr.watermark = 0; attr.wakeup_events = 1; struct perf_event_attr ev_cycle; memset(&amp;ev_cycle, 0, sizeof(ev_cycle)); ev_cycle.type = PERF_TYPE_HARDWARE; ev_cycle.size = sizeof(ev_cycle); ev_cycle.config = PERF_COUNT_HW_CPU_CYCLES; attr.enable_on_exec = 1; ev_cycle.disabled = 0; // 获取当前CPU id // int cpu = sched_getcpu(); // 打开性能事件 int cpu = 0; int fd_instr = perf_event_open(&amp;attr, -1, cpu, -1, 0); // for cpu0 all tasks. assert(fd_instr &gt;= 0); int fd_cycle = perf_event_open(&amp;ev_cycle, -1, cpu, -1, 0); assert(fd_cycle &gt;= 0); // 映射环形缓冲区 必须有，否则epoll_wait会无法正确阻塞。 rbuf = mmap(0, (1 &#43; 1) * page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd_instr, 0); assert(rbuf != MAP_FAILED); // But here we dont receive CIGCHLD triggered by SIGSTOP/SIGCONT . int epfd = epoll_create1(0); struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd_instr, }; epoll_ctl(epfd, EPOLL_CTL_ADD, fd_instr, &amp;ev); sigset_t mask; sigemptyset(&amp;mask); sigaddset(&amp;mask, SIGCHLD); sigprocmask(SIG_BLOCK, &amp;mask, NULL); int sfd = signalfd(-1, &amp;mask, 0); // Dont set SFD_NONBLOCK. It will cause epoll_wait to return immediately. struct epoll_event sig_event; sig_event.events = EPOLLIN; sig_event.data.fd = sfd; epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &amp;sig_event); pid_t child_pid = fork(); if (child_pid == -1) { perror(&#34;fork&#34;); exit(EXIT_FAILURE); } if (child_pid == 0) { // 子进程：暂停自身，等待父进程设置性能计数器 // raise(SIGSTOP); // 将标准输出重定向到 /dev/null if (quiet) { close(STDOUT_FILENO); close(STDERR_FILENO); open(&#34;/dev/null&#34;, O_WRONLY); open(&#34;/dev/null&#34;, O_WRONLY); } // 执行新程序（示例中使用 ls） printf(&#34;Cmd: %s %s\n&#34;, cmd_argv[0], cmd_argv[1]); execvp(cmd_argv[0], cmd_argv); perror(&#34;execvp&#34;); exit(EXIT_FAILURE); } else { // 父进程：设置性能计数器 int status; tb = time(NULL); struct epoll_event got; int retval = epoll_wait(epfd, &amp;got, 1, -1); if (got.data.fd == sfd) { // child process exited. // use ioctl to stop perf counter ioctl(fd_instr, PERF_EVENT_IOC_DISABLE, 0); ioctl(fd_cycle, PERF_EVENT_IOC_DISABLE, 0); } else { // cycle counter reached. kill(child_pid, SIGKILL); // kill directly } te = time(NULL); printf(&#34;executed time: %ld secs\n&#34;, te - tb); long long count; read(fd_cycle, &amp;count, sizeof(count)); printf(&#34;cycles: %lld\n&#34;, count); read(fd_instr, &amp;count, sizeof(count)); printf(&#34;instructions: %lld\n&#34;, count); pid_t ret = waitpid(child_pid, &amp;status, WNOHANG); printf(&#34;child exit %d\n&#34;, status); close(fd_instr); close(fd_cycle); close(sfd); return 0; } }">
+
+      
+    
+	
+  </head><body class="ma0 avenir bg-near-white production">
+
+    
+   
+  
+
+  
+  
+  
+  <header class="cover bg-center" style="background-image: url('https://yjloong.github.io/images/bg01.JPG');">
+    <div class="bg-black-60">
+      <nav class="pv3 ph3 ph4-ns" role="navigation">
+  <div class="flex-l center items-center justify-between">
+    <a href="/" class="f3 fw2 hover-white white-90 dib no-underline">
+      
+        HOME
+      
+    </a>
+    <div class="flex-l items-center">
+      
+
+      
+        <ul class="pl0 mr3">
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/about/" title="About 页">
+              About
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/tags" title="Tags 页">
+              Tags
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/post/" title="aArticles 页">
+              aArticles
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/contact/" title="Contact 页">
+              Contact
+            </a>
+          </li>
+          
+        </ul>
+      
+      <div class="ananke-socials"></div>
+
+    </div>
+  </div>
+</nav>
+
+      <div class="tc-l pv6 ph3 ph4-ns">
+        
+      </div>
+    </div>
+  </header>
+
+
+
+    <main class="pb7" role="main">
+      
+  
+  
+  <article class="flex-l mw8 center ph3 flex-wrap justify-between">
+    <header class="mt4 w-100">
+      <aside class="instapaper_ignoref b helvetica tracked ttu">
+          
+        
+      </aside><div id="sharing" class="mt3 ananke-socials"></div>
+<h1 class="f1 athelas mt3 mb1">在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles</h1>
+      
+      <p class="tracked"><strong>yjloong</strong>
+      </p>
+      
+      
+      
+      <time class="f6 mv4 dib tracked" datetime="2025-07-11T21:50:09Z">七月 11, 2025</time>
+      
+
+      
+      
+        <span class="f6 mv4 dib tracked"> -  </span>
+        <span class="f6 mv4 dib tracked"> -  </span>
+      
+    </header>
+    <div class="nested-copy-line-height lh-copy serif f4 nested-links mid-gray pr4-l w-two-thirds-l"><h1 id="概述">概述</h1>
+<ul>
+<li>checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。</li>
+<li>但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。</li>
+<li>以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处：</li>
+</ul>
+<ol>
+<li>所需时间更短 <strong>(5h &ndash;&gt; 100s)</strong>，100s时间囊括如下(以 <strong>2G</strong> checkpoint为例)：</li>
+</ol>
+<ul>
+<li>websocket拷贝50M checkpoint到FPGA服务器(5s)</li>
+<li>通过DMA烧录50M checkpoint到FPGA DDR(5s)</li>
+<li>程序自拷贝，自解压(lz4解压算法，75s)</li>
+<li>CRC32校验(riscv扩展加速7.5倍后用时15s)</li>
+<li>执行2000w目标指令(0.5s)</li>
+</ul>
+<ol start="2">
+<li>更快评估修改后的核性能变化，以及验证核的正确性。</li>
+<li>真实硬件环境具有更好的真实性。</li>
+<li>快速复现OS内的出现bug，软件仿真几乎难以复现千万条指令后出现的bug，配合jtag更快调试软硬件问题。</li>
+<li>配合高性能逻辑分析仪，在接近全速下捕获难以在仿真中复现的并发 bug 的真实波形。这对调试硬件问题尤为有效。</li>
+</ol>
+<h1 id="实现方案">实现方案</h1>
+<ul>
+<li>软仿可以简单实现N条指令后退出，对应到硬仿，则是通过修改CPU核，通过纯硬件方式实现。</li>
+<li>实现方式可以根据硬件的参与度分类，为了通用性实现，本方案采用纯软件方式实现。</li>
+<li>纯软件实现，基本原理就是通过hpmcounter溢出中断实现，执行N条指令后溢出中断，因此需要sscofpmf，zihpm扩展支持。</li>
+<li>纯软件方式实现有如下方案：</li>
+</ul>
+<ol>
+<li>用户层实现，通过<strong>perf_event_open</strong>系统调用接口，将benchmark作为子进程，设定period为<strong>N</strong>条指令，父进程采用poll等待，修改checkpoint中对应counter的初始值，实现控制子进程执行指令数，具体实现方式看后文。</li>
+<li>OS层实现，通过修改新的PMU驱动实现，实现一个counter overflow handler，触发后打印约定标志，标识指令数执行完成。需要在restorer中修改mhpmevent/mhpmcounter实现溢出中断。具体实现方式看后文。</li>
+<li>非侵入式，opensbi/OS透明，通过M-level异常中断机制实现，下文有详细介绍。</li>
+</ol>
+<h1 id="软件非侵入式实现">软件非侵入式实现</h1>
+<ol>
+<li>为了避免对opensbi/linux的修改，以及灵活性，可拓展性方面，选择最复杂的非侵入式方式，此方案有如下好处：</li>
+<li>调试方便，不用重新编译opensbi/linux，再重制checkpoint。</li>
+<li>无需修改opensbi/linux，保持系统完整性。</li>
+<li>可灵活增加其他功能，如在不重制checkpoint的前提下，通过另外的counter实现在FPGA中进行checkpoint热点统计。</li>
+</ol>
+<h2 id="实现原理">实现原理</h2>
+<ol>
+<li>对checkpoint中的csr值进行修改，禁止LCOFIP委托给S态，打开mstatus.MIE，打开mie.LCOFIP，设置mhpmevent/mhpmcounter/mcountinhibit。</li>
+<li>在restorer中实现M-level异常过滤，如果是counter overflow，则拦下来进行处理，如果不是，则跳转到opensbi中的异常处理入口进行处理。</li>
+<li>在checkpoint中修改CSR_MTVEC为restorer中新的trap入口地址；</li>
+<li>如果是溢出中断，保存全部通用寄存器，拦截处理，处理完成后，恢复全部通用寄存器，执行mret指令；</li>
+<li>否则保存除a0-a7之外通用寄存器，进入opensbi处理；</li>
+<li>从未使用的、存放opensbi异常入口的csr中取出，使用jalr指令跳进去；</li>
+<li>修改opensbi中mret指令，替换为一条普通跳回指令ret；</li>
+<li>恢复部分通用寄存器；</li>
+<li>执行mret指令。
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250710174635.png)</li>
+</ol>
+<h1 id="非侵入实现">非侵入实现</h1>
+<p><a href="https://github.com/yjloong/CPT_FPGA">yjloong/CPT_FPGA: 支持在FPGA上跑指定指令数的Checkpoint。</a></p>
+<h1 id="os-驱动层实现">OS 驱动层实现</h1>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#75715e">#define pr_fmt(fmt) &#34;riscv-pmu-special: &#34; fmt
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/module.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/interrupt.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/irq.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/irqdomain.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/of_irq.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/of.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#define IRQ_NUM RV_IRQ_PMU
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;asm/csr.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> tmp_data{
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> dev_id;
+</span></span><span style="display:flex;"><span>};
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#a6e22e">DEFINE_PER_CPU</span>(<span style="color:#66d9ef">struct</span> tmp_data, irq_data);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">irqreturn_t</span> <span style="color:#a6e22e">interrupt_handler</span>(<span style="color:#66d9ef">int</span> irq, <span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>dev_id)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">uint64_t</span> cc <span style="color:#f92672">=</span> <span style="color:#a6e22e">csr_read</span>(CSR_CYCLE);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">csr_clear</span>(CSR_SIP, <span style="color:#a6e22e">BIT</span>(IRQ_NUM));
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// print end flag
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#a6e22e">printk</span>(KERN_ERR <span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\n\n</span><span style="color:#e6db74">CYCLE:%ld</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, cc);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">while</span>(<span style="color:#ae81ff">1</span>) <span style="color:#66d9ef">asm</span>(<span style="color:#e6db74">&#34;wfi&#34;</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> IRQ_HANDLED;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">pmu_sbi_setup_irqs</span>(<span style="color:#66d9ef">void</span>)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> ret;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> irq_domain <span style="color:#f92672">*</span>domain <span style="color:#f92672">=</span> NULL;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">uint32_t</span> riscv_pmu_irq_num;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">uint32_t</span> riscv_pmu_irq;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>riscv_pmu_irq_num <span style="color:#f92672">=</span> IRQ_NUM;
+</span></span><span style="display:flex;"><span>domain <span style="color:#f92672">=</span> <span style="color:#a6e22e">irq_find_matching_fwnode</span>(<span style="color:#a6e22e">riscv_get_intc_hwnode</span>(), DOMAIN_BUS_ANY);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span>(<span style="color:#f92672">!</span>domain)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#f92672">-</span>ENODEV;
+</span></span><span style="display:flex;"><span>riscv_pmu_irq <span style="color:#f92672">=</span> <span style="color:#a6e22e">irq_create_mapping</span>(domain, riscv_pmu_irq_num);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (<span style="color:#f92672">!</span>riscv_pmu_irq)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#f92672">-</span>ENODEV;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>ret <span style="color:#f92672">=</span> <span style="color:#a6e22e">request_percpu_irq</span>(riscv_pmu_irq, interrupt_handler, <span style="color:#e6db74">&#34;riscv-pmu&#34;</span>, <span style="color:#f92672">&amp;</span>irq_data);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (ret)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> ret;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">int</span> __init <span style="color:#a6e22e">my_driver_init</span>(<span style="color:#66d9ef">void</span>)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printk</span>(KERN_INFO <span style="color:#e6db74">&#34;Initializeing interrupt driver...</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">pmu_sbi_setup_irqs</span>();
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printk</span>(KERN_INFO <span style="color:#e6db74">&#34;Done</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">void</span> __exit <span style="color:#a6e22e">my_driver_exit</span>(<span style="color:#66d9ef">void</span>)
+</span></span><span style="display:flex;"><span>{
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">free_irq</span>(IRQ_NUM, NULL);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">module_init</span>(my_driver_init);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">module_exit</span>(my_driver_exit);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">MODULE_LICENSE</span>(<span style="color:#e6db74">&#34;GPL&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">MODULE_AUTHOR</span>(<span style="color:#e6db74">&#34;YOUR NAME&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">MODULE_DESCRIPTION</span>(<span style="color:#e6db74">&#34;Well&#34;</span>);
+</span></span></code></pre></div><h1 id="用户层实现">用户层实现</h1>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-c" data-lang="c"><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;bits/types/sigset_t.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;errno.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;fcntl.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;getopt.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;linux/perf_event.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sched.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;signal.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdint.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdio.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;stdlib.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;string.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/epoll.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/ioctl.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/mman.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/syscall.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/wait.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;time.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;sys/signalfd.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;unistd.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">#include</span> <span style="color:#75715e">&lt;assert.h&gt;</span><span style="color:#75715e">
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#a6e22e">print_help</span>(<span style="color:#66d9ef">const</span> <span style="color:#66d9ef">char</span> <span style="color:#f92672">*</span>prog_name) {
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;Usage: %s [OPTIONS] -- COMMAND [ARGS...]</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, prog_name);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;Options:</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;  -I INSTRS    Stop the child process after the INSTRS</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;  -h           Show this help message</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;  -q           quiet output of program</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">Example: %s -I100000000 -- ls -l</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, prog_name);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 包装 perf_event_open 系统调用
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">static</span> <span style="color:#66d9ef">int</span> <span style="color:#a6e22e">perf_event_open</span>(<span style="color:#66d9ef">struct</span> perf_event_attr <span style="color:#f92672">*</span>attr, <span style="color:#66d9ef">pid_t</span> pid, <span style="color:#66d9ef">int</span> cpu,
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> group_fd, <span style="color:#66d9ef">unsigned</span> <span style="color:#66d9ef">long</span> flags) {
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#a6e22e">syscall</span>(__NR_perf_event_open, attr, pid, cpu, group_fd, flags);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// sizeof ringbuffer pages: 16 * 4KB
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#75715e">#define RING_BUFFER_PAGES 64
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">void</span> <span style="color:#f92672">*</span>rbuf;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">long</span> page_size <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> <span style="color:#a6e22e">main</span>(<span style="color:#66d9ef">int</span> argc, <span style="color:#66d9ef">char</span> <span style="color:#f92672">*</span><span style="color:#66d9ef">const</span> argv[]) {
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">uint64_t</span> sample_period <span style="color:#f92672">=</span> <span style="color:#ae81ff">10000</span>;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> quiet <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;  <span style="color:#75715e">// 不打印子进程输出内容
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> opt;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">uint64_t</span> num_cycles <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;  <span style="color:#75715e">// 如果不为0，则运行指定次数就停止
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">time_t</span> tb <span style="color:#f92672">=</span> <span style="color:#a6e22e">time</span>(NULL);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">time_t</span> te <span style="color:#f92672">=</span> <span style="color:#a6e22e">time</span>(NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>page_size <span style="color:#f92672">=</span> <span style="color:#a6e22e">sysconf</span>(_SC_PAGESIZE);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">while</span> ((opt <span style="color:#f92672">=</span> <span style="color:#a6e22e">getopt</span>(argc, argv, <span style="color:#e6db74">&#34;hp:I:qn&#34;</span>)) <span style="color:#f92672">!=</span> <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>) {
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">switch</span> (opt) {
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">case</span> <span style="color:#e6db74">&#39;h&#39;</span><span style="color:#f92672">:</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">print_help</span>(argv[<span style="color:#ae81ff">0</span>]);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exit</span>(EXIT_SUCCESS);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">case</span> <span style="color:#e6db74">&#39;q&#39;</span><span style="color:#f92672">:</span>
+</span></span><span style="display:flex;"><span>quiet <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">case</span> <span style="color:#e6db74">&#39;I&#39;</span><span style="color:#f92672">:</span>
+</span></span><span style="display:flex;"><span>num_cycles <span style="color:#f92672">=</span> <span style="color:#a6e22e">strtoul</span>(optarg, NULL, <span style="color:#ae81ff">10</span>);
+</span></span><span style="display:flex;"><span>sample_period <span style="color:#f92672">=</span> num_cycles;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">break</span>;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">default</span><span style="color:#f92672">:</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">print_help</span>(argv[<span style="color:#ae81ff">0</span>]);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exit</span>(EXIT_FAILURE);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (optind <span style="color:#f92672">&gt;=</span> argc) {
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">fprintf</span>(stderr, <span style="color:#e6db74">&#34;No command specified</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">print_help</span>(argv[<span style="color:#ae81ff">0</span>]);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exit</span>(EXIT_FAILURE);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">char</span> <span style="color:#f92672">*</span><span style="color:#66d9ef">const</span> <span style="color:#f92672">*</span>cmd_argv <span style="color:#f92672">=</span> <span style="color:#f92672">&amp;</span>argv[optind];
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 配置性能事件属性
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">struct</span> perf_event_attr attr;
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">memset</span>(<span style="color:#f92672">&amp;</span>attr, <span style="color:#ae81ff">0</span>, <span style="color:#66d9ef">sizeof</span>(attr));
+</span></span><span style="display:flex;"><span>attr.type <span style="color:#f92672">=</span> PERF_TYPE_HARDWARE;
+</span></span><span style="display:flex;"><span>attr.size <span style="color:#f92672">=</span> <span style="color:#66d9ef">sizeof</span>(attr);
+</span></span><span style="display:flex;"><span>attr.config <span style="color:#f92672">=</span> PERF_COUNT_HW_INSTRUCTIONS;
+</span></span><span style="display:flex;"><span>attr.sample_period <span style="color:#f92672">=</span> sample_period;  <span style="color:#75715e">// 每 10000 周期采样一次
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>attr.sample_type <span style="color:#f92672">=</span> PERF_SAMPLE_IP;   <span style="color:#75715e">// 采样指令指针
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>attr.enable_on_exec <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>attr.disabled <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>attr.watermark <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>attr.wakeup_events <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> perf_event_attr ev_cycle;
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">memset</span>(<span style="color:#f92672">&amp;</span>ev_cycle, <span style="color:#ae81ff">0</span>, <span style="color:#66d9ef">sizeof</span>(ev_cycle));
+</span></span><span style="display:flex;"><span>ev_cycle.type <span style="color:#f92672">=</span> PERF_TYPE_HARDWARE;
+</span></span><span style="display:flex;"><span>ev_cycle.size <span style="color:#f92672">=</span> <span style="color:#66d9ef">sizeof</span>(ev_cycle);
+</span></span><span style="display:flex;"><span>ev_cycle.config <span style="color:#f92672">=</span> PERF_COUNT_HW_CPU_CYCLES;
+</span></span><span style="display:flex;"><span>attr.enable_on_exec <span style="color:#f92672">=</span> <span style="color:#ae81ff">1</span>;
+</span></span><span style="display:flex;"><span>ev_cycle.disabled <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 获取当前CPU id
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// int cpu = sched_getcpu();
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 打开性能事件
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> cpu <span style="color:#f92672">=</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> fd_instr <span style="color:#f92672">=</span> <span style="color:#a6e22e">perf_event_open</span>(<span style="color:#f92672">&amp;</span>attr, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>, cpu, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>,
+</span></span><span style="display:flex;"><span><span style="color:#ae81ff">0</span>);  <span style="color:#75715e">// for cpu0 all tasks.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">assert</span>(fd_instr <span style="color:#f92672">&gt;=</span> <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> fd_cycle <span style="color:#f92672">=</span> <span style="color:#a6e22e">perf_event_open</span>(<span style="color:#f92672">&amp;</span>ev_cycle, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>, cpu, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>,
+</span></span><span style="display:flex;"><span><span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">assert</span>(fd_cycle <span style="color:#f92672">&gt;=</span> <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 映射环形缓冲区 必须有，否则epoll_wait会无法正确阻塞。
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>rbuf <span style="color:#f92672">=</span> <span style="color:#a6e22e">mmap</span>(<span style="color:#ae81ff">0</span>, (<span style="color:#ae81ff">1</span> <span style="color:#f92672">+</span> <span style="color:#ae81ff">1</span>) <span style="color:#f92672">*</span> page_size,
+</span></span><span style="display:flex;"><span>PROT_READ <span style="color:#f92672">|</span> PROT_WRITE, MAP_SHARED, fd_instr, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">assert</span>(rbuf <span style="color:#f92672">!=</span> MAP_FAILED);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// But here we dont receive CIGCHLD triggered by SIGSTOP/SIGCONT .
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> epfd <span style="color:#f92672">=</span> <span style="color:#a6e22e">epoll_create1</span>(<span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> epoll_event ev <span style="color:#f92672">=</span> {
+</span></span><span style="display:flex;"><span>.events <span style="color:#f92672">=</span> EPOLLIN,
+</span></span><span style="display:flex;"><span>.data.fd <span style="color:#f92672">=</span> fd_instr,
+</span></span><span style="display:flex;"><span>};
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">epoll_ctl</span>(epfd, EPOLL_CTL_ADD, fd_instr, <span style="color:#f92672">&amp;</span>ev);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">sigset_t</span> mask;
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">sigemptyset</span>(<span style="color:#f92672">&amp;</span>mask);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">sigaddset</span>(<span style="color:#f92672">&amp;</span>mask, SIGCHLD);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">sigprocmask</span>(SIG_BLOCK, <span style="color:#f92672">&amp;</span>mask, NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> sfd <span style="color:#f92672">=</span> <span style="color:#a6e22e">signalfd</span>(<span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>, <span style="color:#f92672">&amp;</span>mask, <span style="color:#ae81ff">0</span>); <span style="color:#75715e">// Dont set SFD_NONBLOCK. It will cause epoll_wait to return immediately.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> epoll_event sig_event;
+</span></span><span style="display:flex;"><span>sig_event.events <span style="color:#f92672">=</span> EPOLLIN;
+</span></span><span style="display:flex;"><span>sig_event.data.fd <span style="color:#f92672">=</span> sfd;
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">epoll_ctl</span>(epfd, EPOLL_CTL_ADD, sfd, <span style="color:#f92672">&amp;</span>sig_event);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">pid_t</span> child_pid <span style="color:#f92672">=</span> <span style="color:#a6e22e">fork</span>();
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (child_pid <span style="color:#f92672">==</span> <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>) {
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">perror</span>(<span style="color:#e6db74">&#34;fork&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exit</span>(EXIT_FAILURE);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (child_pid <span style="color:#f92672">==</span> <span style="color:#ae81ff">0</span>) {
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 子进程：暂停自身，等待父进程设置性能计数器
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// raise(SIGSTOP);
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// 将标准输出重定向到 /dev/null
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">if</span> (quiet) {
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">close</span>(STDOUT_FILENO);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">close</span>(STDERR_FILENO);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">open</span>(<span style="color:#e6db74">&#34;/dev/null&#34;</span>, O_WRONLY);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">open</span>(<span style="color:#e6db74">&#34;/dev/null&#34;</span>, O_WRONLY);
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 执行新程序（示例中使用 ls）
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;Cmd: %s %s</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, cmd_argv[<span style="color:#ae81ff">0</span>], cmd_argv[<span style="color:#ae81ff">1</span>]);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">execvp</span>(cmd_argv[<span style="color:#ae81ff">0</span>], cmd_argv);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">perror</span>(<span style="color:#e6db74">&#34;execvp&#34;</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exit</span>(EXIT_FAILURE);
+</span></span><span style="display:flex;"><span>} <span style="color:#66d9ef">else</span> {
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 父进程：设置性能计数器
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#66d9ef">int</span> status;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>tb <span style="color:#f92672">=</span> <span style="color:#a6e22e">time</span>(NULL);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">struct</span> epoll_event got;
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">int</span> retval <span style="color:#f92672">=</span> <span style="color:#a6e22e">epoll_wait</span>(epfd, <span style="color:#f92672">&amp;</span>got, <span style="color:#ae81ff">1</span>, <span style="color:#f92672">-</span><span style="color:#ae81ff">1</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> (got.data.fd <span style="color:#f92672">==</span> sfd) { <span style="color:#75715e">// child process exited.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e">// use ioctl to stop perf counter
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#a6e22e">ioctl</span>(fd_instr, PERF_EVENT_IOC_DISABLE, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">ioctl</span>(fd_cycle, PERF_EVENT_IOC_DISABLE, <span style="color:#ae81ff">0</span>);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>} <span style="color:#66d9ef">else</span> { <span style="color:#75715e">// cycle counter reached.
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span><span style="color:#a6e22e">kill</span>(child_pid, SIGKILL); <span style="color:#75715e">// kill directly
+</span></span></span><span style="display:flex;"><span><span style="color:#75715e"></span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>te <span style="color:#f92672">=</span> <span style="color:#a6e22e">time</span>(NULL);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;executed time: %ld secs</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, te <span style="color:#f92672">-</span> tb);
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">long</span> <span style="color:#66d9ef">long</span> count;
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">read</span>(fd_cycle, <span style="color:#f92672">&amp;</span>count, <span style="color:#66d9ef">sizeof</span>(count));
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;cycles: %lld</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, count);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">read</span>(fd_instr, <span style="color:#f92672">&amp;</span>count, <span style="color:#66d9ef">sizeof</span>(count));
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;instructions: %lld</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, count);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">pid_t</span> ret <span style="color:#f92672">=</span> <span style="color:#a6e22e">waitpid</span>(child_pid, <span style="color:#f92672">&amp;</span>status, WNOHANG);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">printf</span>(<span style="color:#e6db74">&#34;child exit %d</span><span style="color:#ae81ff">\n</span><span style="color:#e6db74">&#34;</span>, status);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">close</span>(fd_instr);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">close</span>(fd_cycle);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">close</span>(sfd);
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">return</span> <span style="color:#ae81ff">0</span>;
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>}
+</span></span></code></pre></div><ul class="pa0">
+  
+</ul>
+<div class="mt6 instapaper_ignoref">
+      
+      
+      </div>
+    </div>
+
+    <aside class="w-30-l mt6-l">
+
+
+
+
+</aside>
+
+  </article>
+
+    </main>
+    <footer class="bg-black bottom-0 w-100 pa3" role="contentinfo">
+  <div class="flex justify-between">
+  <a class="f4 fw4 hover-white white-70 dn dib-ns pv2 ph3 no-underline" href="https://yjloong.github.io/" >
+    &copy;  HOME 2025 
+  </a>
+    <div><div class="ananke-socials"></div>
+</div>
+  </div>
+</footer>
+
+  </body>
+</html>

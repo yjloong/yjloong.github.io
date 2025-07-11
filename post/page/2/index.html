@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
     
-    <title>HOME</title>
+    <title>aArticles | HOME</title>
     <meta name="viewport" content="width=device-width,minimum-scale=1">
     <meta name="description" content="能吃能睡">
     <meta name="generator" content="Hugo 0.148.0">
@@ -33,27 +33,28 @@
 
     
     
-      <link href="/tags/makefile/index.xml" rel="alternate" type="application/rss+xml" title="HOME" />
-      <link href="/tags/makefile/index.xml" rel="feed" type="application/rss+xml" title="HOME" />
+      <link href="/post/index.xml" rel="alternate" type="application/rss+xml" title="HOME" />
+      <link href="/post/index.xml" rel="feed" type="application/rss+xml" title="HOME" />
       
     
 
     
-      <link rel="canonical" href="https://yjloong.github.io/tags/makefile/">
+      <link rel="canonical" href="https://yjloong.github.io/post/">
     
 
-    <meta property="og:url" content="https://yjloong.github.io/tags/makefile/">
+    <meta property="og:url" content="https://yjloong.github.io/post/">
   <meta property="og:site_name" content="HOME">
-  <meta property="og:title" content="Makefile">
+  <meta property="og:title" content="aArticles">
   <meta property="og:description" content="能吃能睡">
   <meta property="og:locale" content="zh">
   <meta property="og:type" content="website">
 
-  <meta itemprop="name" content="Makefile">
+  <meta itemprop="name" content="aArticles">
   <meta itemprop="description" content="能吃能睡">
-  <meta itemprop="dateModified" content="2025-07-11T20:28:46+00:00">
+  <meta itemprop="datePublished" content="2017-03-02T12:00:00-05:00">
+  <meta itemprop="dateModified" content="2017-03-02T12:00:00-05:00">
   <meta name="twitter:card" content="summary">
-  <meta name="twitter:title" content="Makefile">
+  <meta name="twitter:title" content="aArticles">
   <meta name="twitter:description" content="能吃能睡">
 
       
@@ -115,7 +116,7 @@
 
       <div class="tc-l pv4 pv6-l ph3 ph4-ns">
         <h1 class="f2 f-subheadline-l fw2 white-90 mb0 lh-title">
-          Makefile
+          aArticles
         </h1>
         
       </div>
@@ -125,50 +126,61 @@
 
     <main class="pb7" role="main">
       
-  <article class="cf pa3 pa4-m pa4-l">
-    <div class="measure-wide-l center f4 lh-copy nested-copy-line-height nested-links mid-gray">
-      <p>标签为“Makefile”的页面如下</p>
-    </div>
-  </article>
-  <div class="mw8 center">
-    <section class="flex-ns mt5 flex-wrap justify-around">
+
+  <article class="pa3 pa4-ns nested-copy-line-height">
+    <section class="cf ph3 ph5-l pv3 pv4-l f4 tc-l center measure-wide lh-copy nested-links mid-gray">
       
-        <div class="w-100 mb4 relative bg-white">
+    </section>
+    <aside class="flex-ns mt5 flex-wrap justify-around">
+      
+        <div class="w-100 w-30-l mb4 relative bg-white">
             <div class="mb3 pa4 mid-gray overflow-hidden">
     
       <div class="f6">
-        七月 11, 2025
+        七月 4, 2025
       </div>
     
     <h1 class="f3 near-black">
-      <a href="/post/makefile_template/" class="link black dim">
-        Makefile自动化模板
+      <a href="/post/rcc/" class="link black dim">
+        使用rcc工具制作完整离线python环境
       </a>
     </h1>
     <div class="nested-links f5 lh-copy nested-copy-line-height">
-      <h1 id="features">Features</h1>
-<ul>
-<li><strong>灵活的工具链配置</strong></li>
-<li><strong>智能的源文件管理</strong></li>
-<li><strong>完善的构建目录隔离</strong></li>
-<li><strong>多目标构建支持​</strong></li>
-<li><strong>自动化与优化</strong></li>
-<li><strong>典型应用场景</strong>: 嵌入式开发、小型项目</li>
-</ul>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-makefile" data-lang="makefile"><span style="display:flex;"><span>COMPILER_PREFIX <span style="color:#f92672">:=</span>
-</span></span><span style="display:flex;"><span>CC      <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>gcc
-</span></span><span style="display:flex;"><span>OBJDUMP <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objdump
-</span></span><span style="display:flex;"><span>OBJCOPY <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objcopy
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>OUTPUT_DIR <span style="color:#f92672">:= …</span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre></div>
+      <h1 id="overview">Overview</h1>
+<ol>
+<li>RCC支持构建完整离线python环境，包括python可执行文件本身，以及多个渠道的python包等。</li>
+<li>相较于poetry等，RCC更适合于CI/CD场景，RCC会生成一个完整的离线python环境。</li>
+<li>官方介绍：Repeatable, movable and isolated Python environments for your automation.</li>
+<li>RCC原本是robocorp公司用来构建rpa robot …</li></ol>
     </div>
-  <a href="/post/makefile_template/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
+  <a href="/post/rcc/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
   </div>
 
         </div>
       
-    </section>
-  </div>
+    </aside>
+    
+    <ul class="pagination pagination-default">
+      <li class="page-item">
+        <a href="/post/" aria-label="First" class="page-link" role="button"><span aria-hidden="true">&laquo;&laquo;</span></a>
+      </li>
+      <li class="page-item">
+        <a href="/post/" aria-label="Previous" class="page-link" role="button"><span aria-hidden="true">&laquo;</span></a>
+      </li>
+      <li class="page-item">
+        <a href="/post/" aria-label="Page 1" class="page-link" role="button">1</a>
+      </li>
+      <li class="page-item active">
+        <a aria-current="page" aria-label="Page 2" class="page-link" role="button">2</a>
+      </li>
+      <li class="page-item disabled">
+        <a aria-disabled="true" aria-label="Next" class="page-link" role="button" tabindex="-1"><span aria-hidden="true">&raquo;</span></a>
+      </li>
+      <li class="page-item disabled">
+        <a aria-disabled="true" aria-label="Last" class="page-link" role="button" tabindex="-1"><span aria-hidden="true">&raquo;&raquo;</span></a>
+      </li>
+    </ul>
+  </article>
 
     </main>
     <footer class="bg-black bottom-0 w-100 pa3" role="contentinfo">

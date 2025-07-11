@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1">
+    
+    <title>qemu使用one-insn-per-tb进行debug | HOME</title>
+    <meta name="viewport" content="width=device-width,minimum-scale=1">
+    <meta name="description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能
+
+某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。
+通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。
+换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。
+tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 &ndash;accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。
+启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。
+捕获命令如下：
+
+qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on
+
+捕获内容如下：
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175106.png)
+如果想要捕获其他数据，可以修改如下源文件内容：
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175502.png)
+">
+    <meta name="generator" content="Hugo 0.148.0">
+    
+    
+    
+      <meta name="robots" content="index, follow">
+    
+    <meta name="author" content="yjloong">
+    
+
+    
+<link rel="stylesheet" href="/ananke/css/main.min.cd2c801248c2f81c7369ed96f333206cb56c7a83f356f5eed4b43a403c352549.css" >
+
+
+
+
+    
+
+
+    
+      
+<link rel="shortcut icon" href="/favicon.ico" type="image/x-icon" />
+
+
+    
+
+    
+
+    
+      <link rel="canonical" href="https://yjloong.github.io/post/qemu-debug/">
+    
+
+    <meta property="og:url" content="https://yjloong.github.io/post/qemu-debug/">
+  <meta property="og:site_name" content="HOME">
+  <meta property="og:title" content="qemu使用one-insn-per-tb进行debug">
+  <meta property="og:description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175106.png) 如果想要捕获其他数据，可以修改如下源文件内容： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175502.png)">
+  <meta property="og:locale" content="zh">
+  <meta property="og:type" content="article">
+    <meta property="article:section" content="post">
+    <meta property="article:published_time" content="2025-07-11T21:51:56+00:00">
+    <meta property="article:modified_time" content="2025-07-11T21:51:47+00:00">
+    <meta property="article:tag" content="Qemu">
+    <meta property="article:tag" content="Debug">
+    <meta property="article:tag" content="Riscv">
+
+  <meta itemprop="name" content="qemu使用one-insn-per-tb进行debug">
+  <meta itemprop="description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175106.png) 如果想要捕获其他数据，可以修改如下源文件内容： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175502.png)">
+  <meta itemprop="datePublished" content="2025-07-11T21:51:56+00:00">
+  <meta itemprop="dateModified" content="2025-07-11T21:51:47+00:00">
+  <meta itemprop="wordCount" content="54">
+  <meta itemprop="keywords" content="Qemu,Debug,Riscv">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="qemu使用one-insn-per-tb进行debug">
+  <meta name="twitter:description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175106.png) 如果想要捕获其他数据，可以修改如下源文件内容： ![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175502.png)">
+
+      
+    
+	
+  </head><body class="ma0 avenir bg-near-white production">
+
+    
+   
+  
+
+  
+  
+  
+  <header class="cover bg-center" style="background-image: url('https://yjloong.github.io/images/bg01.JPG');">
+    <div class="bg-black-60">
+      <nav class="pv3 ph3 ph4-ns" role="navigation">
+  <div class="flex-l center items-center justify-between">
+    <a href="/" class="f3 fw2 hover-white white-90 dib no-underline">
+      
+        HOME
+      
+    </a>
+    <div class="flex-l items-center">
+      
+
+      
+        <ul class="pl0 mr3">
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/about/" title="About 页">
+              About
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/tags" title="Tags 页">
+              Tags
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/post/" title="aArticles 页">
+              aArticles
+            </a>
+          </li>
+          
+          <li class="list f5 f4-ns fw4 dib pr3">
+            <a class="hover-white white-90 no-underline" href="/contact/" title="Contact 页">
+              Contact
+            </a>
+          </li>
+          
+        </ul>
+      
+      <div class="ananke-socials"></div>
+
+    </div>
+  </div>
+</nav>
+
+      <div class="tc-l pv6 ph3 ph4-ns">
+        
+      </div>
+    </div>
+  </header>
+
+
+
+    <main class="pb7" role="main">
+      
+  
+  
+  <article class="flex-l mw8 center ph3 flex-wrap justify-between">
+    <header class="mt4 w-100">
+      <aside class="instapaper_ignoref b helvetica tracked ttu">
+          
+        
+      </aside><div id="sharing" class="mt3 ananke-socials"></div>
+<h1 class="f1 athelas mt3 mb1">qemu使用one-insn-per-tb进行debug</h1>
+      
+      <p class="tracked"><strong>yjloong</strong>
+      </p>
+      
+      
+      
+      <time class="f6 mv4 dib tracked" datetime="2025-07-11T21:51:56Z">七月 11, 2025</time>
+      
+
+      
+      
+        <span class="f6 mv4 dib tracked"> -  </span>
+        <span class="f6 mv4 dib tracked"> -  </span>
+      
+    </header>
+    <div class="nested-copy-line-height lh-copy serif f4 nested-links mid-gray pr4-l w-two-thirds-l"><h1 id="qemu-debug-尝试对某一段指令的执行情况进行跟踪类似arm-trace功能">QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能</h1>
+<ul>
+<li>某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。</li>
+<li>通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。</li>
+<li>换用采用qemu带有的 <strong>-d help -D qemu.log</strong> 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。</li>
+<li>tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 <strong>struct TranslationBlock</strong> ，但可以通过选项 <strong>&ndash;accel tcg,one-insn-per-tb=on</strong> 设定一条riscv指令对应一个block。</li>
+<li>启动上述功能后，执行速度会下降10/100倍，可以再通过 <strong>-dfilter 0x80080000..0x80090000</strong> 设定捕获指令范围。</li>
+<li>捕获命令如下：</li>
+</ul>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-bash" data-lang="bash"><span style="display:flex;"><span>qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf<span style="color:#f92672">=</span>off,sstc<span style="color:#f92672">=</span>on,zihpm<span style="color:#f92672">=</span>off,svpbmt<span style="color:#f92672">=</span>off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb<span style="color:#f92672">=</span>on
+</span></span></code></pre></div><ul>
+<li>捕获内容如下：
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175106.png)</li>
+<li>如果想要捕获其他数据，可以修改如下源文件内容：
+![image](/home/ubuntu/hugo_with_obsidian/static/images/Pasted image 20250707175502.png)</li>
+</ul>
+<ul class="pa0">
+  
+   <li class="list di">
+     <a href="/tags/qemu/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Qemu</a>
+   </li>
+  
+   <li class="list di">
+     <a href="/tags/debug/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Debug</a>
+   </li>
+  
+   <li class="list di">
+     <a href="/tags/riscv/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Riscv</a>
+   </li>
+  
+</ul>
+<div class="mt6 instapaper_ignoref">
+      
+      
+      </div>
+    </div>
+
+    <aside class="w-30-l mt6-l">
+
+
+
+
+</aside>
+
+  </article>
+
+    </main>
+    <footer class="bg-black bottom-0 w-100 pa3" role="contentinfo">
+  <div class="flex justify-between">
+  <a class="f4 fw4 hover-white white-70 dn dib-ns pv2 ph3 no-underline" href="https://yjloong.github.io/" >
+    &copy;  HOME 2025 
+  </a>
+    <div><div class="ananke-socials"></div>
+</div>
+  </div>
+</footer>
+
+  </body>
+</html>
