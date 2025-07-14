@@ -7,7 +7,7 @@
     <title>aArticles | HOME</title>
     <meta name="viewport" content="width=device-width,minimum-scale=1">
     <meta name="description" content="能吃能睡">
-    <meta name="generator" content="Hugo 0.148.0">
+    <meta name="generator" content="Hugo 0.148.1">
     
     
     
@@ -137,25 +137,32 @@
             <div class="mb3 pa4 mid-gray overflow-hidden">
     
       <div class="f6">
-        七月 11, 2025
+        七月 14, 2025
       </div>
     
     <h1 class="f3 near-black">
-      <a href="/post/cpt_fpga/" class="link black dim">
-        在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles
+      <a href="/post/makefile_template/" class="link black dim">
+        Makefile自动化模板
       </a>
     </h1>
     <div class="nested-links f5 lh-copy nested-copy-line-height">
-      <h1 id="概述">概述</h1>
+      <h1 id="features">Features</h1>
 <ul>
-<li>checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。</li>
-<li>但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。</li>
-<li>以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处：</li>
+<li><strong>灵活的工具链配置</strong></li>
+<li><strong>智能的源文件管理</strong></li>
+<li><strong>完善的构建目录隔离</strong></li>
+<li><strong>多目标构建支持​</strong></li>
+<li><strong>自动化与优化</strong></li>
+<li><strong>典型应用场景</strong>: 嵌入式开发、小型项目</li>
 </ul>
-<ol>
-<li> …</li></ol>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-makefile" data-lang="makefile"><span style="display:flex;"><span>COMPILER_PREFIX <span style="color:#f92672">:=</span>
+</span></span><span style="display:flex;"><span>CC      <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>gcc
+</span></span><span style="display:flex;"><span>OBJDUMP <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objdump
+</span></span><span style="display:flex;"><span>OBJCOPY <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objcopy
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">.SILENT</span><span style="color:#f92672">: …</span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre></div>
     </div>
-  <a href="/post/cpt_fpga/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
+  <a href="/post/makefile_template/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
   </div>
 
         </div>
@@ -164,7 +171,7 @@
             <div class="mb3 pa4 mid-gray overflow-hidden">
     
       <div class="f6">
-        七月 11, 2025
+        七月 13, 2025
       </div>
     
     <h1 class="f3 near-black">
@@ -191,28 +198,21 @@
       </div>
     
     <h1 class="f3 near-black">
-      <a href="/post/makefile_template/" class="link black dim">
-        Makefile自动化模板
+      <a href="/post/cpt_fpga/" class="link black dim">
+        在FPGA上通过CPU::PMU::Counter纯软件实现跑指定N条指令或cycles
       </a>
     </h1>
     <div class="nested-links f5 lh-copy nested-copy-line-height">
-      <h1 id="features">Features</h1>
+      <h1 id="概述">概述</h1>
 <ul>
-<li><strong>灵活的工具链配置</strong></li>
-<li><strong>智能的源文件管理</strong></li>
-<li><strong>完善的构建目录隔离</strong></li>
-<li><strong>多目标构建支持​</strong></li>
-<li><strong>自动化与优化</strong></li>
-<li><strong>典型应用场景</strong>: 嵌入式开发、小型项目</li>
+<li>checkpoint 在bug场景复现、估算CPU跑分等重要场景有应用，尤其在估算CPU跑分方面，在riscv种已有大量实现案例。</li>
+<li>但现在大都是以软件模拟器来实现跑分估算，一个2000w条指令的checkpoint大概需要5h，本文尝试通过纯软件方案实现checkpoint在fpga上运行。</li>
+<li>以50M FPGA CPU为例，2000w指令，假如cpi = 2.5，则需要0.1s即可，相较于软件模拟方案，fpga有如下好处：</li>
 </ul>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-makefile" data-lang="makefile"><span style="display:flex;"><span>COMPILER_PREFIX <span style="color:#f92672">:=</span>
-</span></span><span style="display:flex;"><span>CC      <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>gcc
-</span></span><span style="display:flex;"><span>OBJDUMP <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objdump
-</span></span><span style="display:flex;"><span>OBJCOPY <span style="color:#f92672">:=</span> <span style="color:#66d9ef">$(</span>COMPILER_PREFIX<span style="color:#66d9ef">)</span>objcopy
-</span></span><span style="display:flex;"><span>
-</span></span><span style="display:flex;"><span>OUTPUT_DIR <span style="color:#f92672">:= …</span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre></div>
+<ol>
+<li> …</li></ol>
     </div>
-  <a href="/post/makefile_template/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
+  <a href="/post/cpt_fpga/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
   </div>
 
         </div>
