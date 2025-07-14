@@ -51,8 +51,8 @@
 
   <meta itemprop="name" content="纵览博学">
   <meta itemprop="description" content="静能生慧">
-  <meta itemprop="datePublished" content="2025-07-13T11:30:02+00:00">
-  <meta itemprop="dateModified" content="2025-07-14T11:49:29+00:00">
+  <meta itemprop="datePublished" content="2025-07-11T22:01:16+00:00">
+  <meta itemprop="dateModified" content="2025-07-14T14:35:52+00:00">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="纵览博学">
   <meta name="twitter:description" content="静能生慧">
@@ -156,6 +156,36 @@
       </div>
     
     <h1 class="f3 near-black">
+      <a href="/post/qemu-debug/" class="link black dim">
+        qemu使用one-insn-per-tb进行debug
+      </a>
+    </h1>
+    <div class="nested-links f5 lh-copy nested-copy-line-height">
+      <h1 id="qemu-debugging-risc-v指令执行跟踪指南">QEMU Debugging RISC-V指令执行跟踪指南</h1>
+<h2 id="问题背景">问题背景</h2>
+<p>在调试RISC-V程序时，发现程序执行会卡在一条特定的<code>csrw</code>指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。</p>
+<h2 id="调试挑战">调试挑战</h2>
+<ol>
+<li><strong>GDB调试限制</strong>：</li>
+</ol>
+<ul>
+<li>使用gdbserver调试时，会在问题指令处卡住</li>
+<li>直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导 …</li></ul>
+    </div>
+  <a href="/post/qemu-debug/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
+  </div>
+
+          </div>
+        
+          <div class="w-100 mb4 relative">
+            
+              <div class="mb3 pa4 mid-gray overflow-hidden">
+    
+      <div class="f6">
+        七月 14, 2025
+      </div>
+    
+    <h1 class="f3 near-black">
       <a href="/post/makefile_template/" class="link black dim">
         Makefile自动化模板
       </a>
@@ -178,30 +208,6 @@
 </span></span><span style="display:flex;"><span><span style="color:#a6e22e">.SILENT</span><span style="color:#f92672">: …</span></span></span></span></span></span></span></span></span></span></span></span></span></code></pre></div>
     </div>
   <a href="/post/makefile_template/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
-  </div>
-
-          </div>
-        
-          <div class="w-100 mb4 relative">
-            
-              <div class="mb3 pa4 mid-gray overflow-hidden">
-    
-      <div class="f6">
-        七月 13, 2025
-      </div>
-    
-    <h1 class="f3 near-black">
-      <a href="/post/qemu-debug/" class="link black dim">
-        qemu使用one-insn-per-tb进行debug
-      </a>
-    </h1>
-    <div class="nested-links f5 lh-copy nested-copy-line-height">
-      <h1 id="qemu-debug-尝试对某一段指令的执行情况进行跟踪类似arm-trace功能">QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能</h1>
-<ul>
-<li>某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。</li>
-<li>通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg …</li></ul>
-    </div>
-  <a href="/post/qemu-debug/" class="ba b--moon-gray bg-light-gray br2 color-inherit dib f7 hover-bg-moon-gray link mt2 ph2 pv1">继续阅读</a>
   </div>
 
           </div>

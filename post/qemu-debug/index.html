@@ -6,24 +6,73 @@
     
     <title>qemu使用one-insn-per-tb进行debug | HOME</title>
     <meta name="viewport" content="width=device-width,minimum-scale=1">
-    <meta name="description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能
+    <meta name="description" content="QEMU Debugging RISC-V指令执行跟踪指南
+问题背景
+在调试RISC-V程序时，发现程序执行会卡在一条特定的csrw指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。
+调试挑战
 
-某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。
-通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。
-换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。
-tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 &ndash;accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。
-启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。
-捕获命令如下：
+GDB调试限制：
 
-qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on
 
-捕获内容如下：
+使用gdbserver调试时，会在问题指令处卡住
+直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导致：
 
-如果想要捕获其他数据，可以修改如下源文件内容：
 
-例如，CSR处把所有CSR全写上，即可捕获状态机。
-根据env-&gt;priv的变化，即可捕获优先级变化时的状态级。
-">
+调试信息经过中间IR转换
+code_gen_buffer内存区域的调试异常困难
+出现backtrace打印错误、指令翻译延迟等问题
+
+
+QEMU日志限制：
+
+
+使用-d help -D qemu.log方式调试时
+无法捕获单条指令执行前后的完整状态
+因为QEMU默认按指令块(Translation Block)记录信息
+
+解决方案
+1. 启用单指令翻译模式
+通过以下参数强制每条RISC-V指令对应一个Translation Block：
+--accel tcg,one-insn-per-tb=on
+注意：这会使执行速度降低10-100倍，但能获得更精细的调试信息。
+2. 限定调试范围
+使用-dfilter参数限定捕获的指令地址范围，减少日志量：
+-dfilter 0x80000000..0x80010000
+3. 完整调试命令示例
+qemu-system-riscv64 \
+  -M nemu \
+  -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off \
+  -m 2G \
+  -bios gcpt.bin \
+  -nographic \
+  -dfilter 0x80000000..0x80010000 \
+  -d cpu \
+  -D qemu.log \
+  --accel tcg,one-insn-per-tb=on
+技术细节
+
+TCG工作原理：
+
+
+代码段按块(Translation Block)翻译
+对应QEMU内部结构体struct TranslationBlock
+默认会合并多条指令到一个Block以提高性能
+
+
+调试信息输出：
+
+
+-d cpu：输出CPU执行信息
+-D qemu.log：指定日志输出文件
+结合one-insn-per-tb可获取每条指令的详细执行状态
+
+注意事项
+
+性能与调试详细程度的权衡
+建议先限定调试范围(-dfilter)再逐步扩大
+对于复杂问题，可能需要结合gdb和qemu日志分析
+
+此方法特别适用于：">
     <meta name="generator" content="Hugo 0.148.1">
     
     
@@ -58,25 +107,33 @@ qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off 
     <meta property="og:url" content="https://yjloong.github.io/post/qemu-debug/">
   <meta property="og:site_name" content="HOME">
   <meta property="og:title" content="qemu使用one-insn-per-tb进行debug">
-  <meta property="og:description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： 如果想要捕获其他数据，可以修改如下源文件内容： 例如，CSR处把所有CSR全写上，即可捕获状态机。 根据env-&gt;priv的变化，即可捕获优先级变化时的状态级。">
+  <meta property="og:description" content="QEMU Debugging RISC-V指令执行跟踪指南 问题背景 在调试RISC-V程序时，发现程序执行会卡在一条特定的csrw指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。
+调试挑战 GDB调试限制： 使用gdbserver调试时，会在问题指令处卡住 直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导致： 调试信息经过中间IR转换 code_gen_buffer内存区域的调试异常困难 出现backtrace打印错误、指令翻译延迟等问题 QEMU日志限制： 使用-d help -D qemu.log方式调试时 无法捕获单条指令执行前后的完整状态 因为QEMU默认按指令块(Translation Block)记录信息 解决方案 1. 启用单指令翻译模式 通过以下参数强制每条RISC-V指令对应一个Translation Block：
+--accel tcg,one-insn-per-tb=on 注意：这会使执行速度降低10-100倍，但能获得更精细的调试信息。
+2. 限定调试范围 使用-dfilter参数限定捕获的指令地址范围，减少日志量：
+-dfilter 0x80000000..0x80010000 3. 完整调试命令示例 qemu-system-riscv64 \ -M nemu \ -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off \ -m 2G \ -bios gcpt.bin \ -nographic \ -dfilter 0x80000000..0x80010000 \ -d cpu \ -D qemu.log \ --accel tcg,one-insn-per-tb=on 技术细节 TCG工作原理： 代码段按块(Translation Block)翻译 对应QEMU内部结构体struct TranslationBlock 默认会合并多条指令到一个Block以提高性能 调试信息输出： -d cpu：输出CPU执行信息 -D qemu.log：指定日志输出文件 结合one-insn-per-tb可获取每条指令的详细执行状态 注意事项 性能与调试详细程度的权衡 建议先限定调试范围(-dfilter)再逐步扩大 对于复杂问题，可能需要结合gdb和qemu日志分析 此方法特别适用于：">
   <meta property="og:locale" content="zh">
   <meta property="og:type" content="article">
     <meta property="article:section" content="post">
-    <meta property="article:published_time" content="2025-07-13T11:30:02+00:00">
-    <meta property="article:modified_time" content="2025-07-13T11:30:02+00:00">
-    <meta property="article:tag" content="Qemu">
-    <meta property="article:tag" content="Debug">
-    <meta property="article:tag" content="Riscv">
+    <meta property="article:published_time" content="2025-07-14T14:35:52+00:00">
+    <meta property="article:modified_time" content="2025-07-14T14:35:52+00:00">
 
   <meta itemprop="name" content="qemu使用one-insn-per-tb进行debug">
-  <meta itemprop="description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： 如果想要捕获其他数据，可以修改如下源文件内容： 例如，CSR处把所有CSR全写上，即可捕获状态机。 根据env-&gt;priv的变化，即可捕获优先级变化时的状态级。">
-  <meta itemprop="datePublished" content="2025-07-13T11:30:02+00:00">
-  <meta itemprop="dateModified" content="2025-07-13T11:30:02+00:00">
-  <meta itemprop="wordCount" content="50">
-  <meta itemprop="keywords" content="Qemu,Debug,Riscv">
+  <meta itemprop="description" content="QEMU Debugging RISC-V指令执行跟踪指南 问题背景 在调试RISC-V程序时，发现程序执行会卡在一条特定的csrw指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。
+调试挑战 GDB调试限制： 使用gdbserver调试时，会在问题指令处卡住 直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导致： 调试信息经过中间IR转换 code_gen_buffer内存区域的调试异常困难 出现backtrace打印错误、指令翻译延迟等问题 QEMU日志限制： 使用-d help -D qemu.log方式调试时 无法捕获单条指令执行前后的完整状态 因为QEMU默认按指令块(Translation Block)记录信息 解决方案 1. 启用单指令翻译模式 通过以下参数强制每条RISC-V指令对应一个Translation Block：
+--accel tcg,one-insn-per-tb=on 注意：这会使执行速度降低10-100倍，但能获得更精细的调试信息。
+2. 限定调试范围 使用-dfilter参数限定捕获的指令地址范围，减少日志量：
+-dfilter 0x80000000..0x80010000 3. 完整调试命令示例 qemu-system-riscv64 \ -M nemu \ -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off \ -m 2G \ -bios gcpt.bin \ -nographic \ -dfilter 0x80000000..0x80010000 \ -d cpu \ -D qemu.log \ --accel tcg,one-insn-per-tb=on 技术细节 TCG工作原理： 代码段按块(Translation Block)翻译 对应QEMU内部结构体struct TranslationBlock 默认会合并多条指令到一个Block以提高性能 调试信息输出： -d cpu：输出CPU执行信息 -D qemu.log：指定日志输出文件 结合one-insn-per-tb可获取每条指令的详细执行状态 注意事项 性能与调试详细程度的权衡 建议先限定调试范围(-dfilter)再逐步扩大 对于复杂问题，可能需要结合gdb和qemu日志分析 此方法特别适用于：">
+  <meta itemprop="datePublished" content="2025-07-14T14:35:52+00:00">
+  <meta itemprop="dateModified" content="2025-07-14T14:35:52+00:00">
+  <meta itemprop="wordCount" content="89">
   <meta name="twitter:card" content="summary">
   <meta name="twitter:title" content="qemu使用one-insn-per-tb进行debug">
-  <meta name="twitter:description" content="QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能 某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。 通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。 换用采用qemu带有的 -d help -D qemu.log 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。 tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 struct TranslationBlock ，但可以通过选项 –accel tcg,one-insn-per-tb=on 设定一条riscv指令对应一个block。 启动上述功能后，执行速度会下降10/100倍，可以再通过 -dfilter 0x80080000..0x80090000 设定捕获指令范围。 捕获命令如下： qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb=on 捕获内容如下： 如果想要捕获其他数据，可以修改如下源文件内容： 例如，CSR处把所有CSR全写上，即可捕获状态机。 根据env-&gt;priv的变化，即可捕获优先级变化时的状态级。">
+  <meta name="twitter:description" content="QEMU Debugging RISC-V指令执行跟踪指南 问题背景 在调试RISC-V程序时，发现程序执行会卡在一条特定的csrw指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。
+调试挑战 GDB调试限制： 使用gdbserver调试时，会在问题指令处卡住 直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导致： 调试信息经过中间IR转换 code_gen_buffer内存区域的调试异常困难 出现backtrace打印错误、指令翻译延迟等问题 QEMU日志限制： 使用-d help -D qemu.log方式调试时 无法捕获单条指令执行前后的完整状态 因为QEMU默认按指令块(Translation Block)记录信息 解决方案 1. 启用单指令翻译模式 通过以下参数强制每条RISC-V指令对应一个Translation Block：
+--accel tcg,one-insn-per-tb=on 注意：这会使执行速度降低10-100倍，但能获得更精细的调试信息。
+2. 限定调试范围 使用-dfilter参数限定捕获的指令地址范围，减少日志量：
+-dfilter 0x80000000..0x80010000 3. 完整调试命令示例 qemu-system-riscv64 \ -M nemu \ -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off \ -m 2G \ -bios gcpt.bin \ -nographic \ -dfilter 0x80000000..0x80010000 \ -d cpu \ -D qemu.log \ --accel tcg,one-insn-per-tb=on 技术细节 TCG工作原理： 代码段按块(Translation Block)翻译 对应QEMU内部结构体struct TranslationBlock 默认会合并多条指令到一个Block以提高性能 调试信息输出： -d cpu：输出CPU执行信息 -D qemu.log：指定日志输出文件 结合one-insn-per-tb可获取每条指令的详细执行状态 注意事项 性能与调试详细程度的权衡 建议先限定调试范围(-dfilter)再逐步扩大 对于复杂问题，可能需要结合gdb和qemu日志分析 此方法特别适用于：">
 
       
     
@@ -162,7 +219,7 @@ qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off 
       
       
       
-      <time class="f6 mv4 dib tracked" datetime="2025-07-13T11:30:02Z">七月 13, 2025</time>
+      <time class="f6 mv4 dib tracked" datetime="2025-07-14T14:35:52Z">七月 14, 2025</time>
       
 
       
@@ -171,37 +228,87 @@ qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf=off,sstc=on,zihpm=off,svpbmt=off 
         <span class="f6 mv4 dib tracked"> -  </span>
       
     </header>
-    <div class="nested-copy-line-height lh-copy serif f4 nested-links mid-gray pr4-l w-two-thirds-l"><h1 id="qemu-debug-尝试对某一段指令的执行情况进行跟踪类似arm-trace功能">QEMU Debug 尝试对某一段指令的执行情况进行跟踪，类似arm trace功能</h1>
+    <div class="nested-copy-line-height lh-copy serif f4 nested-links mid-gray pr4-l w-two-thirds-l"><h1 id="qemu-debugging-risc-v指令执行跟踪指南">QEMU Debugging RISC-V指令执行跟踪指南</h1>
+<h2 id="问题背景">问题背景</h2>
+<p>在调试RISC-V程序时，发现程序执行会卡在一条特定的<code>csrw</code>指令处。由于QEMU使用TCG(Tiny Code Generator)将RISC-V指令翻译为x86指令，传统的调试方法遇到了诸多挑战。</p>
+<h2 id="调试挑战">调试挑战</h2>
+<ol>
+<li><strong>GDB调试限制</strong>：</li>
+</ol>
 <ul>
-<li>某一段程序的执行总是hang到一条riscv csrw指令，使用gdbserver debug时，卡在这一条指令的指令。</li>
-<li>通过gdb直接debug qemu-system-riscv64时，由于是x86机器，采用的加速器是tcg，riscv指令经过一种中间IR后最终翻译成x86指令，在code_gen_buffer指向的内存位置，针对这一块涉及tcg的调试异常艰难。有许多莫名奇妙的问题出现，如gdb backtrace打印出错、翻译指令延迟等。</li>
-<li>换用采用qemu带有的 <strong>-d help -D qemu.log</strong> 方式进行debug时，不能捕获到这条执行执行前后的状态，因为qemu按指令块进行dump信息的。</li>
-<li>tcg为了加速翻译，代码段是一段一段进行翻译的，对应的qemu内结构体 <strong>struct TranslationBlock</strong> ，但可以通过选项 <strong>&ndash;accel tcg,one-insn-per-tb=on</strong> 设定一条riscv指令对应一个block。</li>
-<li>启动上述功能后，执行速度会下降10/100倍，可以再通过 <strong>-dfilter 0x80080000..0x80090000</strong> 设定捕获指令范围。</li>
-<li>捕获命令如下：</li>
+<li>使用gdbserver调试时，会在问题指令处卡住</li>
+<li>直接调试qemu-system-riscv64时，由于x86主机使用TCG加速器，导致：</li>
 </ul>
-<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-bash" data-lang="bash"><span style="display:flex;"><span>qemu-system-riscv64 -M nemu -cpu rv64,sscofpmf<span style="color:#f92672">=</span>off,sstc<span style="color:#f92672">=</span>on,zihpm<span style="color:#f92672">=</span>off,svpbmt<span style="color:#f92672">=</span>off -m 2G -bios gcpt.bin -nographic -dfilter 0x80000000..0x80010000 -d cpu -D qemu.log --accel tcg,one-insn-per-tb<span style="color:#f92672">=</span>on
-</span></span></code></pre></div><ul>
-<li>捕获内容如下：
-<img src="/images/Pasted_image_20250707175106.png" alt="image"></li>
+<ul>
+<li>调试信息经过中间IR转换</li>
+<li>code_gen_buffer内存区域的调试异常困难</li>
+<li>出现backtrace打印错误、指令翻译延迟等问题</li>
+</ul>
+<ol start="2">
+<li><strong>QEMU日志限制</strong>：</li>
+</ol>
+<ul>
+<li>使用<code>-d help -D qemu.log</code>方式调试时</li>
+<li>无法捕获单条指令执行前后的完整状态</li>
+<li>因为QEMU默认按指令块(Translation Block)记录信息</li>
+</ul>
+<h2 id="解决方案">解决方案</h2>
+<h3 id="1-启用单指令翻译模式">1. 启用单指令翻译模式</h3>
+<p>通过以下参数强制每条RISC-V指令对应一个Translation Block：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-bash" data-lang="bash"><span style="display:flex;"><span>--accel tcg,one-insn-per-tb<span style="color:#f92672">=</span>on
+</span></span></code></pre></div><p><em>注意</em>：这会使执行速度降低10-100倍，但能获得更精细的调试信息。</p>
+<h3 id="2-限定调试范围">2. 限定调试范围</h3>
+<p>使用<code>-dfilter</code>参数限定捕获的指令地址范围，减少日志量：</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-bash" data-lang="bash"><span style="display:flex;"><span>-dfilter 0x80000000..0x80010000
+</span></span></code></pre></div><h3 id="3-完整调试命令示例">3. 完整调试命令示例</h3>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;"><code class="language-bash" data-lang="bash"><span style="display:flex;"><span>qemu-system-riscv64 <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -M nemu <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -cpu rv64,sscofpmf<span style="color:#f92672">=</span>off,sstc<span style="color:#f92672">=</span>on,zihpm<span style="color:#f92672">=</span>off,svpbmt<span style="color:#f92672">=</span>off <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -m 2G <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -bios gcpt.bin <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -nographic <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -dfilter 0x80000000..0x80010000 <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -d cpu <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  -D qemu.log <span style="color:#ae81ff">\
+</span></span></span><span style="display:flex;"><span><span style="color:#ae81ff"></span>  --accel tcg,one-insn-per-tb<span style="color:#f92672">=</span>on
+</span></span></code></pre></div><h2 id="技术细节">技术细节</h2>
+<ol>
+<li><strong>TCG工作原理</strong>：</li>
+</ol>
+<ul>
+<li>代码段按块(Translation Block)翻译</li>
+<li>对应QEMU内部结构体<code>struct TranslationBlock</code></li>
+<li>默认会合并多条指令到一个Block以提高性能</li>
+</ul>
+<ol start="2">
+<li><strong>调试信息输出</strong>：</li>
+</ol>
+<ul>
+<li><code>-d cpu</code>：输出CPU执行信息</li>
+<li><code>-D qemu.log</code>：指定日志输出文件</li>
+<li>结合<code>one-insn-per-tb</code>可获取每条指令的详细执行状态</li>
+</ul>
+<h2 id="注意事项">注意事项</h2>
+<ol>
+<li>性能与调试详细程度的权衡</li>
+<li>建议先限定调试范围(<code>-dfilter</code>)再逐步扩大</li>
+<li>对于复杂问题，可能需要结合gdb和qemu日志分析</li>
+</ol>
+<p>此方法特别适用于：</p>
+<ul>
+<li>指令级执行跟踪</li>
+<li>特权级指令调试</li>
+<li>难以复现的时序相关问题</li>
+</ul>
+<h2 id="内容如下">内容如下：</h2>
+<p><img src="/images/Pasted_image_20250707175106.png" alt="image"></p>
+<ul>
 <li>如果想要捕获其他数据，可以修改如下源文件内容：
 <img src="/images/Pasted_image_20250707175502.png" alt="image"></li>
 <li>例如，CSR处把所有CSR全写上，即可捕获状态机。</li>
 <li>根据env-&gt;priv的变化，即可捕获优先级变化时的状态级。</li>
 </ul>
 <ul class="pa0">
-  
-   <li class="list di">
-     <a href="/tags/qemu/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Qemu</a>
-   </li>
-  
-   <li class="list di">
-     <a href="/tags/debug/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Debug</a>
-   </li>
-  
-   <li class="list di">
-     <a href="/tags/riscv/" class="link f5 grow br-pill ba ph3 pv2 mb2 dib black sans-serif no-underline">Riscv</a>
-   </li>
   
 </ul>
 <div class="mt6 instapaper_ignoref">
