@@ -2,28 +2,28 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
   xmlns:xhtml="http://www.w3.org/1999/xhtml">
   <url>
-    <loc>https://yjloong.github.io/post/qemu-debug/</loc>
-    <lastmod>2025-07-14T14:35:52+00:00</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.5</priority>
-  </url><url>
-    <loc>https://yjloong.github.io/</loc>
-    <lastmod>2025-07-14T14:35:52+00:00</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.5</priority>
-  </url><url>
     <loc>https://yjloong.github.io/tags/makefile/</loc>
-    <lastmod>2025-07-14T11:49:29+00:00</lastmod>
+    <lastmod>2025-07-15T15:49:10+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
   </url><url>
     <loc>https://yjloong.github.io/post/makefile_template/</loc>
-    <lastmod>2025-07-14T11:49:29+00:00</lastmod>
+    <lastmod>2025-07-15T15:49:10+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
   </url><url>
     <loc>https://yjloong.github.io/tags/</loc>
-    <lastmod>2025-07-14T11:49:29+00:00</lastmod>
+    <lastmod>2025-07-15T15:49:10+00:00</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.5</priority>
+  </url><url>
+    <loc>https://yjloong.github.io/</loc>
+    <lastmod>2025-07-15T15:49:10+00:00</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.5</priority>
+  </url><url>
+    <loc>https://yjloong.github.io/post/qemu-debug/</loc>
+    <lastmod>2025-07-14T14:35:52+00:00</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.5</priority>
   </url><url>
